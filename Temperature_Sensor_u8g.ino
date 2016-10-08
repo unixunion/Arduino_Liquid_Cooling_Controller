@@ -9,8 +9,9 @@
 
 
 // Data wire is plugged into port 2 on the Arduino
-#define ONE_WIRE_BUS 2
+#define ONE_WIRE_BUS 3
 #define TEMPERATURE_PRECISION 12
+
 
 // Oled on a UNO
 #define OLED_MOSI   9
@@ -20,9 +21,13 @@
 #define OLED_RESET 13
 #define MAX_MEM 2048
 
+// button panel
 #define FUNC_BTN_PIN 5
 #define R_BTN_PIN 4
 #define L_BTN_PIN 6
+
+// speaker
+#define SPKR_PIN 7
 
 // some state tracking vars for the UI
 int btn_func_state = 0;
@@ -68,15 +73,15 @@ struct config_t
 
 
 // gauges
-pgfx_HBAR cpu = pgfx_HBAR(0,0,20,64,"CPU ",display);
-pgfx_HBAR gpu = pgfx_HBAR(26,0,20,64,"GFX ",display);
-pgfx_HBAR cbar = pgfx_HBAR(52,0,20,64,"COLD",display);
-pgfx_HBAR hbar = pgfx_HBAR(78,0,20,64," HOT",display);
-pgfx_HBAR rbar = pgfx_HBAR(104,0,20,64," RAD",display);
+pgfx_HBAR cpu = pgfx_HBAR(0,0,20,64,"CPU ",display, SPKR_PIN);
+pgfx_HBAR gpu = pgfx_HBAR(26,0,20,64,"GFX ",display, SPKR_PIN);
+pgfx_HBAR cbar = pgfx_HBAR(52,0,20,64,"COLD",display, SPKR_PIN);
+pgfx_HBAR hbar = pgfx_HBAR(78,0,20,64," HOT",display, SPKR_PIN);
+pgfx_HBAR rbar = pgfx_HBAR(104,0,20,64," RAD",display, SPKR_PIN);
 
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
-OneWire oneWire(3);
+OneWire oneWire(ONE_WIRE_BUS);
 
 // Pass our oneWire reference to Dallas Temperature.
 DallasTemperature sensors(&oneWire);
@@ -108,8 +113,8 @@ void setup(void)
   pinMode(FUNC_BTN_PIN, INPUT);
   pinMode(L_BTN_PIN, INPUT);
   pinMode(R_BTN_PIN, INPUT);
-  pinMode(7, OUTPUT);
-  tone(7, 80, 125);
+  pinMode(SPKR_PIN, OUTPUT);
+  tone(SPKR_PIN, 80, 125);
   
   // start serial port
   Serial.begin(9600);

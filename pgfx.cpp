@@ -29,7 +29,7 @@ void pgfx_HBAR::update(float value, float max)
       _display->drawStr(16, 0, F("WARNING"));
       _display->drawStr(48, 24, _name);
     } while( _display->nextPage() );
-    tone(7, 80, 125);
+    tone(_spkr_pin, 80, 125);
     delay(250);
   } else {
   

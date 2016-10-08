@@ -58,7 +58,7 @@ public:
 
 protected:
   // vars
-  uint8_t _width, _height, _x, _y;
+  uint8_t _width, _height, _x, _y, _spkr_pin;
   U8GLIB_SSD1306_128X64 * _display;
 };
 
@@ -66,10 +66,11 @@ protected:
 class pgfx_HBAR  : public pgfx  {
 public:
 
-  inline pgfx_HBAR(int x, int y, int w, int h, char * name, U8GLIB_SSD1306_128X64 &display)
+  inline pgfx_HBAR(int x, int y, int w, int h, char * name, U8GLIB_SSD1306_128X64 &display, int spkr_pin)
   {
     pgfx::init(x, y, w, h, display);
     _name = name;
+    _spkr_pin = spkr_pin;
   }
 
   void
@@ -83,10 +84,11 @@ protected:
 class pgfx_BUTTON  : public pgfx {
 
 public:
-  inline pgfx_BUTTON(int x, int y, int w, int h, char * name, U8GLIB_SSD1306_128X64 &display)
+  inline pgfx_BUTTON(int x, int y, int w, int h, char * name, U8GLIB_SSD1306_128X64 &display, int spkr_pin)
   {
     pgfx::init(x, y, w, h, display);
     _name = name;
+    _spkr_pin = spkr_pin;
   }
 
 protected:
