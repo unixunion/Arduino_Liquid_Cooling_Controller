@@ -24,6 +24,7 @@
 #define R_BTN_PIN 4
 #define L_BTN_PIN 6
 
+// some state tracking vars for the UI
 int btn_func_state = 0;
 int last_btn_func_state = 0;
 int btn_r_state = 0;
@@ -40,20 +41,15 @@ int setup_menu_item = 1; // the initial setup item on the page
 //#define OLED_CS    7
 //#define OLED_RESET 5
 
-
-// Define the EEPROM addresses for various configs
-//#define F1_PWM 10
-//#define F1_DIR 4
-//#define F2_PWM 11
-//#define PWM_FAST 200
-//#define PWM_SLOW 120
-
+// The display
 U8GLIB_SSD1306_128X64 display(OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RESET);
 
+// refresh rate control of the display
 unsigned int OLED_REFRESH = 125;
 unsigned int LAST_OLED_REFRESH;
 unsigned long now;
 
+// storage for 4 temperature probes
 float t1;
 float t2;
 float t3;
@@ -72,10 +68,10 @@ struct config_t
 
 
 // gauges
-pgfx_HBAR cpu = pgfx_HBAR(0,0,20,64,"cpu ",display);
-pgfx_HBAR gpu = pgfx_HBAR(26,0,20,64,"gpu ",display);
-pgfx_HBAR cbar = pgfx_HBAR(52,0,20,64,"cold",display);
-pgfx_HBAR hbar = pgfx_HBAR(78,0,20,64," hot",display);
+pgfx_HBAR cpu = pgfx_HBAR(0,0,20,64,"CPU ",display);
+pgfx_HBAR gpu = pgfx_HBAR(26,0,20,64,"GFX ",display);
+pgfx_HBAR cbar = pgfx_HBAR(52,0,20,64,"COLD",display);
+pgfx_HBAR hbar = pgfx_HBAR(78,0,20,64," HOT",display);
 pgfx_HBAR rbar = pgfx_HBAR(104,0,20,64," RAD",display);
 
 
@@ -91,35 +87,35 @@ DeviceAddress th1, th2, th3, th4;
 
 void setup(void)
 {
-  // fans first
 
-//  pinMode(F1_PWM, OUTPUT);
-//  pinMode(F1_DIR, OUTPUT);
-//  digitalWrite(F1_DIR, HIGH);
-//  analogWrite(F1_PWM, 255-PWM_SLOW);
-//  analogWrite(F2_PWM, 255-PWM_SLOW);
+  // read the config from eeprom
   EEPROM_readAnything(0, configuration);
-    
+
+  // display the bootlogo
+  display.setFont(u8g_font_ncenB14);
+  display.setFontPosTop();
+  display.setRot180();
   display.firstPage();
   do {
-    display.drawXBMP( 0, 0, logo_width, logo_height, logo_bits);
-    display.setColorIndex(1);
+//    display.drawXBMP( 0, 0, logo_width, logo_height, logo_bits);
+//    display.setColorIndex(1);
+  display.drawStr(0,0,"Psimax");
+  display.drawStr(32,24,"Systems");
+  display.setColorIndex(1);
   } while( display.nextPage() );
 
   // buttons pin mappins, each pulled down via 10k resistor
   pinMode(FUNC_BTN_PIN, INPUT);
   pinMode(L_BTN_PIN, INPUT);
   pinMode(R_BTN_PIN, INPUT);
+  pinMode(7, OUTPUT);
+  tone(7, 80, 125);
   
   // start serial port
   Serial.begin(9600);
-  Serial.println(F("T-Gauges"));
+  Serial.println(F("Psimax Liquid Cooling Controller"));
 
 
-  display.setFont(u8g_font_profont12);
-  display.setFontPosTop();
-
- 
 
   // Start up the library
   sensors.begin();
@@ -163,25 +159,8 @@ void setup(void)
   // assigns the first address found to th1
   if (!oneWire.search(th1)) Serial.println(F("Unable to find address for th1"));
   if (!oneWire.search(th2)) Serial.println(F("Unable to find address for th2"));
-  if (!oneWire.search(th3)) Serial.println(F("Unable to find address for th2"));\
-  if (!oneWire.search(th4)) Serial.println(F("Unable to find address for th2"));
-
-  // show the addresses we found on the bus
-  Serial.print(F("Device 0 Address: "));
-  printAddress(th1);
-  Serial.println();
-
-  Serial.print(F("Device 1 Address: "));
-  printAddress(th2);
-  Serial.println();
-
-  Serial.print(F("Device 2 Address: "));
-  printAddress(th3);
-  Serial.println();
-
-  Serial.print(F("Device 3 Address: "));
-  printAddress(th4);
-  Serial.println();
+  if (!oneWire.search(th3)) Serial.println(F("Unable to find address for th3"));
+  if (!oneWire.search(th4)) Serial.println(F("Unable to find address for th4"));
 
   // set the resolution
   sensors.setResolution(th1, TEMPERATURE_PRECISION);
@@ -189,21 +168,7 @@ void setup(void)
   sensors.setResolution(th3, TEMPERATURE_PRECISION);
   sensors.setResolution(th4, TEMPERATURE_PRECISION);
 
-  Serial.print("Device 0 Resolution: ");
-  Serial.print(sensors.getResolution(th1), DEC);
-  Serial.println();
 
-  Serial.print("Device 1 Resolution: ");
-  Serial.print(sensors.getResolution(th2), DEC);
-  Serial.println();
-
-  Serial.print("Device 2 Resolution: ");
-  Serial.print(sensors.getResolution(th3), DEC);
-  Serial.println();
-
-  Serial.print("Device 3 Resolution: ");
-  Serial.print(sensors.getResolution(th4), DEC);
-  Serial.println();
 }
 
 // function to print a device address
@@ -260,8 +225,8 @@ void draw(float t1, float t2, float t3 ,float t4) {
 
     cpu.update(t1, configuration.cpu_max);
     gpu.update(t2, configuration.gpu_max);
-    cbar.update(t3, configuration.cold_max);
-    hbar.update(t4, configuration.hot_max);
+    cbar.update(t4, configuration.cold_max);
+    hbar.update(t3, configuration.hot_max);
     rbar.update(t3-t4, configuration.rad_max);
 //    mbar.update(MAX_MEM-freeMemory(),MAX_MEM);
    
@@ -285,6 +250,9 @@ void tweak_value(int &val, int btn_r_state, int btn_l_state) {
 
 // setup function displays the GUI for settings
 void drawSetup(void) {
+
+  display.setFont(u8g_font_profont12);
+  display.setFontPosTop();
 
   // read any button states
   btn_r_state = digitalRead(R_BTN_PIN);
