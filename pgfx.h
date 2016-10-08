@@ -20,25 +20,27 @@ https://code.google.com/p/u8glib/
 U8GLIB_SSD1306_128X64 display(OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RESET);
 
 // setup
-// display.setFont(u8g_font_profont12);
-// display.setFontPosTop();
+display.setFont(u8g_font_profont12);
+display.setFontPosTop();
 
 // Gauges, use 10 bytes of memory Each
-pgfx_HBAR fbar = pgfx_HBAR( 0, 0,20,64,"FUEL",display);
-pgfx_HBAR mbar = pgfx_HBAR(26, 0,20,64,"MONO",display);
-pgfx_HBAR ebar = pgfx_HBAR(52, 0,20,64,"ELEC",display);
-pgfx_HBAR gbar = pgfx_HBAR(78, 0,20,64,"G's",display);
+pgfx_HBAR fbar = pgfx_HBAR( 0, 0,20,64,"FUEL",display, 7);
+pgfx_HBAR mbar = pgfx_HBAR(26, 0,20,64,"MONO",display, 7);
+pgfx_HBAR ebar = pgfx_HBAR(52, 0,20,64,"ELEC",display, 7);
+pgfx_HBAR gbar = pgfx_HBAR(78, 0,20,64,"G's",display, 7);
 
 // single bargraphs
 fbar.update(VData.LiquidFuelS, VData.LiquidFuelTotS, VData.LiquidFuel, VData.LiquidFuelTot);
 mbar.update(VData.MonoProp, VData.MonoPropTot);
 ebar.update(VData.ECharge, VData.EChargeTot);
 gbar.update(VData.G, 15);
-display.display();
+
+
 
 */
 
 #include <U8glib.h>
+
 
 // common stubs for all hud elements
 class pgfx {
@@ -81,20 +83,20 @@ protected:
   char * _name;
 };
 
-class pgfx_BUTTON  : public pgfx {
-
-public:
-  inline pgfx_BUTTON(int x, int y, int w, int h, char * name, U8GLIB_SSD1306_128X64 &display, int spkr_pin)
-  {
-    pgfx::init(x, y, w, h, display);
-    _name = name;
-    _spkr_pin = spkr_pin;
-  }
-
-protected:
-  char * _name;
-
-};
+//class pgfx_BUTTON  : public pgfx {
+//
+//public:
+//  inline pgfx_BUTTON(int x, int y, int w, int h, char * name, U8GLIB_SSD1306_128X64 &display, int spkr_pin)
+//  {
+//    pgfx::init(x, y, w, h, display);
+//    _name = name;
+//    _spkr_pin = spkr_pin;
+//  }
+//
+//protected:
+//  char * _name;
+//
+//};
 
 
 

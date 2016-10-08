@@ -104,7 +104,7 @@ void setup(void)
   do {
 //    display.drawXBMP( 0, 0, logo_width, logo_height, logo_bits);
 //    display.setColorIndex(1);
-  display.drawStr(0,0,"Psimax");
+  display.drawStr(0,0,"deBlox");
   display.drawStr(32,24,"Systems");
   display.setColorIndex(1);
   } while( display.nextPage() );
@@ -119,8 +119,6 @@ void setup(void)
   // start serial port
   Serial.begin(9600);
   Serial.println(F("Psimax Liquid Cooling Controller"));
-
-
 
   // Start up the library
   sensors.begin();
