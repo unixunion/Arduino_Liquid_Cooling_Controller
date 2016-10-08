@@ -24,3 +24,6 @@ exceed thresholds which can be edited through 3 buttons, and settings are saved 
 Arduino UNO
 Arduino Screw Shield to make thing easier
 
+# Schematic
+
+![Schematic]https://raw.githubusercontent.com/unixunion/Arduino_Liquid_Cooling_Controller/master/Sketch_bb.png)
