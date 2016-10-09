@@ -10,8 +10,8 @@
 
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 3
-#define TEMPERATURE_PRECISION 12
-
+#define TEMPERATURE_PRECISION_12 12
+#define TEMPERATURE_PRECISION_9 9
 
 // Oled on a UNO
 #define OLED_MOSI   9
@@ -20,6 +20,9 @@
 #define OLED_CS    12
 #define OLED_RESET 13
 #define MAX_MEM 2048
+
+// reset pin
+#define RESET_PIN 0
 
 // button panel
 #define FUNC_BTN_PIN 5
@@ -54,21 +57,34 @@ unsigned int OLED_REFRESH = 125;
 unsigned int LAST_OLED_REFRESH;
 unsigned long now;
 
+// structure for temp
+struct temp_struct
+{
+  float temperature;
+  float max;
+  char * name;
+};
+
+
+// array of temperature probes
+//struct temp_struct probes[4];
+
 // storage for 4 temperature probes
-float t1;
-float t2;
-float t3;
-float t4;
+struct temp_struct t1;
+struct temp_struct t2;
+struct temp_struct t3;
+struct temp_struct t4;
 
 // thresholds config structure
 struct config_t
 {
-    int cpu_max;
-    int gpu_max;
-    int cold_max;
-    int hot_max;
-    int rad_max;
-    int fan_max;
+    int t1_max;
+    int t2_max;
+    int t3_max;
+    int t4_max;
+    int aux1_max;
+    int aux2_max;
+    boolean hires;
 } configuration;
 
 
@@ -89,12 +105,16 @@ DallasTemperature sensors(&oneWire);
 // arrays to hold device addresses
 DeviceAddress th1, th2, th3, th4;
 
+void(* resetFunc) (void) = 0;//declare reset function at address 0
 
 void setup(void)
 {
-
   // read the config from eeprom
   EEPROM_readAnything(0, configuration);
+  t1.max = configuration.t1_max;
+  t2.max = configuration.t2_max;
+  t3.max = configuration.t3_max;
+  t4.max = configuration.t4_max;
 
   // display the bootlogo
   display.setFont(u8g_font_ncenB14);
@@ -113,7 +133,7 @@ void setup(void)
   pinMode(FUNC_BTN_PIN, INPUT);
   pinMode(L_BTN_PIN, INPUT);
   pinMode(R_BTN_PIN, INPUT);
-  pinMode(SPKR_PIN, OUTPUT);
+
   tone(SPKR_PIN, 80, 125);
   
   // start serial port
@@ -166,10 +186,15 @@ void setup(void)
   if (!oneWire.search(th4)) Serial.println(F("Unable to find address for th4"));
 
   // set the resolution
-  sensors.setResolution(th1, TEMPERATURE_PRECISION);
-  sensors.setResolution(th2, TEMPERATURE_PRECISION);
-  sensors.setResolution(th3, TEMPERATURE_PRECISION);
-  sensors.setResolution(th4, TEMPERATURE_PRECISION);
+  int temperature_precision = TEMPERATURE_PRECISION_9;
+  if (configuration.hires) {
+    Serial.println(F("HiRes Mode"));
+    temperature_precision = TEMPERATURE_PRECISION_12;
+  }
+  sensors.setResolution(th1, temperature_precision);
+  sensors.setResolution(th2, temperature_precision);
+  sensors.setResolution(th3, temperature_precision);
+  sensors.setResolution(th4, temperature_precision);
 
 
 }
@@ -215,30 +240,21 @@ float printData(DeviceAddress deviceAddress)
   return t;
 }
 
-void draw(float t1, float t2, float t3 ,float t4) {
-  // graphic commands to redraw the complete screen should be placed here
-
-//    display.drawStr(0,0, "H: " + t1);
-//    display.print("H: ");
-//    display.println(t1);
-//    display.print("C: ");
-//    display.println(t2);
-//    display.print("dT:");
-//    display.println(t1-t2);
-
-    cpu.update(t1, configuration.cpu_max);
-    gpu.update(t2, configuration.gpu_max);
-    cbar.update(t4, configuration.cold_max);
-    hbar.update(t3, configuration.hot_max);
-    rbar.update(t3-t4, configuration.rad_max);
-//    mbar.update(MAX_MEM-freeMemory(),MAX_MEM);
-   
-
-//    display.display();
-
+void draw(temp_struct ts1, temp_struct ts2, temp_struct ts3 ,temp_struct ts4) {
+    cpu.update(ts1.temperature, ts1.max);
+    gpu.update(ts2.temperature, ts2.max);
+    cbar.update(ts4.temperature, ts4.max);
+    hbar.update(ts3.temperature, ts3.max);
+    rbar.update(t3.temperature-t4.temperature, configuration.aux1_max);
 }
 
 
+// headless monitor the temperatures and tweak fan/pump/aux 
+void monitor(temp_struct ts1, temp_struct ts2, temp_struct ts3 ,temp_struct ts4) {
+  
+}
+
+// inc / dec int based on input keys
 void tweak_value(int &val, int btn_r_state, int btn_l_state) { 
   if (btn_r_state == HIGH && !button_press) {
     val++;
@@ -249,6 +265,22 @@ void tweak_value(int &val, int btn_r_state, int btn_l_state) {
   }
 }
 
+// invert booleans on input keys
+void tweak_value(boolean &val, int btn_r_state, int btn_l_state) { 
+  if (btn_r_state == HIGH && !button_press) {
+    val=!val;
+    button_press=true;
+  } else if (btn_l_state == HIGH && !button_press) {
+    val=!val;
+    button_press=true;
+  }
+}
+
+// converts booleans to string for easy handling
+inline const char * const BoolToString(bool b)
+{
+  return b ? "True" : "False";
+}
 
 
 // setup function displays the GUI for settings
@@ -257,41 +289,54 @@ void drawSetup(void) {
   display.setFont(u8g_font_profont12);
   display.setFontPosTop();
 
-  // read any button states
+  // read all button states
   btn_r_state = digitalRead(R_BTN_PIN);
   btn_l_state = digitalRead(L_BTN_PIN);
   btn_func_state = digitalRead(FUNC_BTN_PIN);
 
-  // a little re-usable buffer for float to str
+  // a little re-usable buffer for display conversions to str
   char str_buffer[5];
 
   // page 1 of setup menu
   if (setup_menu_page==1) {
-    display.drawStr(0, 0, "Setup 1/2");
+    display.drawStr(0, 0, "Setup 1/3");
     display.drawStr(0, 14, F("cpu:"));
     display.drawStr(0, 28, F("gpu:"));
     display.drawStr(0, 42, F("cold:"));
   
     // buffer to put arbitrairy chars into
-    dtostrf(configuration.cpu_max, 2, 2, str_buffer);
+    dtostrf(configuration.t1_max, 2, 2, str_buffer);
     display.drawStr(40,14, str_buffer);
-    dtostrf(configuration.gpu_max, 2, 2, str_buffer);
+    dtostrf(configuration.t2_max, 2, 2, str_buffer);
     display.drawStr(40,28, str_buffer);
-    dtostrf(configuration.cold_max, 2, 2, str_buffer);
+    dtostrf(configuration.t3_max, 2, 2, str_buffer);
     display.drawStr(40,42, str_buffer);
+
+  // page 2 of setup menu
   } else if (setup_menu_page==2) {
-    display.drawStr(0, 0, "Setup 2/2:");
+    display.drawStr(0, 0, "Setup 2/3:");
     display.drawStr(0, 14, F("hot:"));
     display.drawStr(0, 28, F("RAD:"));
     display.drawStr(0, 42, F("fan:"));
   
     // buffer to put arbitrairy chars into
-    dtostrf(configuration.hot_max, 2, 2, str_buffer);
+    dtostrf(configuration.t4_max, 2, 2, str_buffer);
     display.drawStr(40,14, str_buffer);
-    dtostrf(configuration.rad_max, 2, 2, str_buffer);
+    dtostrf(configuration.aux1_max, 2, 2, str_buffer);
     display.drawStr(40,28, str_buffer);
-    dtostrf(configuration.fan_max, 2, 2, str_buffer);
+    dtostrf(configuration.aux2_max, 2, 2, str_buffer);
     display.drawStr(40,42, str_buffer);
+
+  // page 3 of setup menu
+  } else if (setup_menu_page==3) { 
+    display.drawStr(0, 0, "Setup 3/3:");
+    display.drawStr(0, 14, F("12bit:"));
+    display.drawStr(0, 28, F("aux1:"));
+    display.drawStr(0, 42, F("aux2:"));
+  
+    // buffer to put arbitrairy chars into
+    display.drawStr(40,14, BoolToString(configuration.hires));
+
   }
 
   // line under the current selected item
@@ -309,8 +354,8 @@ void drawSetup(void) {
       setup_menu_item = 1;
     }
 
-    // if page is 3 or higher, set to 0, which is exit
-    if (setup_menu_page>=3) {
+    // if page is 4 or higher, set to 0, which is exit
+    if (setup_menu_page>=4) {
       setup_menu_page = 0; // notifies main loop exiting config
       display.firstPage();
       do {  
@@ -321,22 +366,26 @@ void drawSetup(void) {
   }
 
   // CPU Temp on page 1
-  if (setup_menu_page==1 && setup_menu_item == 1) {tweak_value(configuration.cpu_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==1 && setup_menu_item == 1) {tweak_value(configuration.t1_max, btn_r_state, btn_l_state);}
 
   // GPU Temp on page 1
-  if (setup_menu_page==1 && setup_menu_item == 2) {tweak_value(configuration.gpu_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==1 && setup_menu_item == 2) {tweak_value(configuration.t2_max, btn_r_state, btn_l_state);}
 
   // Cold Temp on page 1
-  if (setup_menu_page==1 && setup_menu_item == 3) {tweak_value(configuration.cold_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==1 && setup_menu_item == 3) {tweak_value(configuration.t3_max, btn_r_state, btn_l_state);}
 
   // Hot Water Temp on page 1
-  if (setup_menu_page==2 && setup_menu_item == 1) {tweak_value(configuration.hot_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==2 && setup_menu_item == 1) {tweak_value(configuration.t4_max, btn_r_state, btn_l_state);}
 
   // Rad Temp on page 1
-  if (setup_menu_page==2 && setup_menu_item == 2) {tweak_value(configuration.rad_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==2 && setup_menu_item == 2) {tweak_value(configuration.aux1_max, btn_r_state, btn_l_state);}
 
   // Fan Relative to RAD on page 1
-  if (setup_menu_page==2 && setup_menu_item == 3) {tweak_value(configuration.fan_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==2 && setup_menu_item == 3) {tweak_value(configuration.aux2_max, btn_r_state, btn_l_state);}
+
+  // Fan Relative to RAD on page 1
+  if (setup_menu_page==3 && setup_menu_item == 1) {tweak_value(configuration.hires, btn_r_state, btn_l_state);}
+
 
   if (digitalRead(R_BTN_PIN)==LOW && digitalRead(L_BTN_PIN)==LOW && digitalRead(FUNC_BTN_PIN) == LOW && button_press) {
     button_press=false;
@@ -346,17 +395,14 @@ void drawSetup(void) {
 
 void loop(void) {
 
-
   // check the func button state, doing a simple debounce
   btn_func_state = digitalRead(FUNC_BTN_PIN);
   
-  //setup_menu_page=0 && btn_func_state == HIGH && setup_mode && btn_func_state != last_btn_func_stat
+  // if setup has been quit, the page will be set to 0
   if ( setup_menu_page==0 ) {
     // exiting setup mode
-    setup_mode = false;
-    setup_menu_page = 1;
-    display.firstPage();
-    last_btn_func_state = btn_func_state;
+    delay(1000);
+    resetFunc();
   } else if (btn_func_state == HIGH && !setup_mode && btn_func_state != last_btn_func_state) {
     // entering setup
     button_press = true;
@@ -369,12 +415,14 @@ void loop(void) {
   }
 
   if (!setup_mode) {
-    Serial.println(F("Reading Sensors"));
+    Serial.print(F("Reading Sensors: "));
+    int m = millis();
     sensors.requestTemperatures();
-    t1 = printData(th1);
-    t2 = printData(th2);
-    t3 = printData(th3);
-    t4 = printData(th4);
+    Serial.println(millis()-m);
+    t1.temperature = printData(th1);
+    t2.temperature = printData(th2);
+    t3.temperature = printData(th3);
+    t4.temperature = printData(th4);
   }
   
   // call sensors.requestTemperatures() to issue a global temperature

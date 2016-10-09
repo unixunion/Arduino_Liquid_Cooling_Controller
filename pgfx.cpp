@@ -22,6 +22,10 @@ void pgfx_HBAR::update(float value, float max)
 {
 
   if (value >= max) {
+    Serial.print("Warning");
+    Serial.print(value);
+    Serial.print(" is greater than ");
+    Serial.println(max);
     _display->setFont(u8g_font_ncenB14);
     _display->setFontPosTop();
     _display->firstPage();
@@ -32,7 +36,6 @@ void pgfx_HBAR::update(float value, float max)
     tone(_spkr_pin, 80, 125);
     delay(250);
   } else {
-  
     _display->setFont(u8g_font_profont12);
     _display->setFontPosTop();
     _display->drawStr(_x, _y, _name);
@@ -47,7 +50,6 @@ void pgfx_HBAR::update(float value, float max)
     _display->setFontPosTop();
     _display->drawStr(_x, _y+20 + (_height-36), str_buffer );
   }
-
 }
 
 void pgfx_HBAR::update(float v1, float m1, float v2, float m2)
