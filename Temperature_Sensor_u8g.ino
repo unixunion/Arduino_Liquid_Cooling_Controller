@@ -9,7 +9,7 @@
 
 
 // Data wire is plugged into port 2 on the Arduino
-#define ONE_WIRE_BUS 3
+#define ONE_WIRE_BUS 2
 #define TEMPERATURE_PRECISION_12 12
 #define TEMPERATURE_PRECISION_9 9
 
@@ -23,6 +23,10 @@
 
 // reset pin
 #define RESET_PIN 0
+
+// fan pin
+#define FAN_PIN 3
+unsigned long fan_adjust_time;
 
 // button panel
 #define FUNC_BTN_PIN 5
@@ -62,9 +66,13 @@ struct temp_struct
 {
   float temperature;
   float max;
-  char * name;
+  char name[4];
 };
 
+
+// names of components, pointed to by config per "monitor"
+static const char components[][4] = {"CPU", "GFX", "Cold", "HOT", "RadΔ", "Aux1", "Aux2", "Rad1", "Rad2"};
+#define NUM_COMPONENTS 8
 
 // array of temperature probes
 //struct temp_struct probes[4];
@@ -78,22 +86,33 @@ struct temp_struct t4;
 // thresholds config structure
 struct config_t
 {
-    int t1_max;
-    int t2_max;
-    int t3_max;
-    int t4_max;
-    int aux1_max;
-    int aux2_max;
+    uint8_t t1_max;
+    uint8_t t1_name;
+    uint8_t t2_max;
+    uint8_t t2_name;
+    uint8_t t3_max;
+    uint8_t t3_name;
+    uint8_t t4_max;
+    uint8_t t4_name;
+    uint8_t aux1_max;
+    uint8_t aux1_name;
+    uint8_t aux2_max;
+    uint8_t aux2_name;
+    uint8_t fan1_min;
+    uint8_t fan1_max;
     boolean hires;
 } configuration;
 
 
+// fans
+uint8_t fan1_speed;
+
 // gauges
-pgfx_HBAR cpu = pgfx_HBAR(0,0,20,64,"CPU ",display, SPKR_PIN);
-pgfx_HBAR gpu = pgfx_HBAR(26,0,20,64,"GFX ",display, SPKR_PIN);
-pgfx_HBAR cbar = pgfx_HBAR(52,0,20,64,"COLD",display, SPKR_PIN);
-pgfx_HBAR hbar = pgfx_HBAR(78,0,20,64," HOT",display, SPKR_PIN);
-pgfx_HBAR rbar = pgfx_HBAR(104,0,20,64," RAD",display, SPKR_PIN);
+pgfx_HBAR t1bar = pgfx_HBAR(0,0,20,64," T1 ",display, SPKR_PIN);
+pgfx_HBAR t2bar = pgfx_HBAR(26,0,20,64," T2 ",display, SPKR_PIN);
+pgfx_HBAR t3bar = pgfx_HBAR(52,0,20,64," T3 ",display, SPKR_PIN);
+pgfx_HBAR t4bar = pgfx_HBAR(78,0,20,64," T4 ",display, SPKR_PIN);
+pgfx_HBAR fan1bar = pgfx_HBAR(104,0,20,64," F1 ",display, SPKR_PIN);
 
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
@@ -111,15 +130,24 @@ void setup(void)
 {
   // read the config from eeprom
   EEPROM_readAnything(0, configuration);
+
+  // set the max thresholds from config
   t1.max = configuration.t1_max;
+  strncpy( t1.name, components[configuration.t1_name], 4);
   t2.max = configuration.t2_max;
+  strncpy( t2.name, components[configuration.t2_name], 4);
   t3.max = configuration.t3_max;
+  strncpy( t3.name, components[configuration.t3_name], 4);
   t4.max = configuration.t4_max;
+  strncpy( t4.name, components[configuration.t4_name], 4);
+
+  // set the initial fan speeds to 40% max
+  fan1_speed = configuration.fan1_max*0.40;
 
   // display the bootlogo
   display.setFont(u8g_font_ncenB14);
   display.setFontPosTop();
-  display.setRot180();
+  //display.setRot180();
   display.firstPage();
   do {
 //    display.drawXBMP( 0, 0, logo_width, logo_height, logo_bits);
@@ -133,12 +161,16 @@ void setup(void)
   pinMode(FUNC_BTN_PIN, INPUT);
   pinMode(L_BTN_PIN, INPUT);
   pinMode(R_BTN_PIN, INPUT);
+  pinMode(FAN_PIN, OUTPUT);
 
+  // test the speaker
   tone(SPKR_PIN, 80, 125);
   
   // start serial port
   Serial.begin(9600);
   Serial.println(F("Psimax Liquid Cooling Controller"));
+
+//  Serial.println(components[0]);
 
   // Start up the library
   sensors.begin();
@@ -188,14 +220,13 @@ void setup(void)
   // set the resolution
   int temperature_precision = TEMPERATURE_PRECISION_9;
   if (configuration.hires) {
-    Serial.println(F("HiRes Mode"));
+//    Serial.println(F("HiRes Mode"));
     temperature_precision = TEMPERATURE_PRECISION_12;
   }
   sensors.setResolution(th1, temperature_precision);
   sensors.setResolution(th2, temperature_precision);
   sensors.setResolution(th3, temperature_precision);
   sensors.setResolution(th4, temperature_precision);
-
 
 }
 
@@ -241,37 +272,131 @@ float printData(DeviceAddress deviceAddress)
 }
 
 void draw(temp_struct ts1, temp_struct ts2, temp_struct ts3 ,temp_struct ts4) {
-    cpu.update(ts1.temperature, ts1.max);
-    gpu.update(ts2.temperature, ts2.max);
-    cbar.update(ts4.temperature, ts4.max);
-    hbar.update(ts3.temperature, ts3.max);
-    rbar.update(t3.temperature-t4.temperature, configuration.aux1_max);
+  t1bar.update(ts1.temperature, ts1.max, ts1.name);
+  t2bar.update(ts2.temperature, ts2.max, ts2.name);
+  t3bar.update(ts3.temperature, ts3.max, ts3.name);
+  t4bar.update(ts4.temperature, ts4.max, ts4.name);
+  fan1bar.update(((float)fan1_speed/(float)configuration.fan1_max)*100.0, 100, "FAN1");
 }
 
 
 // headless monitor the temperatures and tweak fan/pump/aux 
-void monitor(temp_struct ts1, temp_struct ts2, temp_struct ts3 ,temp_struct ts4) {
+void monitor(temp_struct ts) {
+  if (ts.temperature >= ts.max) {
+    display.setFont(u8g_font_ncenB14);
+    display.setFontPosTop();
+    display.firstPage();
+    do {
+     display.drawStr(16, 0, F("WARNING"));
+     display.drawStr(48, 24, ts.name);
+    } while( display.nextPage() );
+    tone(SPKR_PIN, 80, 125);
+    delay(500);
+  } 
+//  else if (ts.temperature >= (0.85*ts.max)) {
+//    // raise the fan speed a little at 85% capacity
+//    fan1_speed = (configuration.fan1_max*0.85);
+//  } else if (ts.temperature >= (0.60*ts.max)) {
+//    fan1_speed = (configuration.fan1_max*0.60);
+//  } else if (ts.temperature >= (0.40*ts.max)) {
+//    fan1_speed = (configuration.fan1_max*0.40);
+//  } else if (ts.temperature >= (0.20*ts.max)) {
+//    fan1_speed = (configuration.fan1_max*0.20);
+//  } else if (ts.temperature <= (0.20*ts.max)) {
+//    fan1_speed = (configuration.fan1_min);
+//  }
+}
+
+// headless monitor the temperatures and tweak fan/pump/aux 
+void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct ts4) {
+
+
+  // put all the hot temps together and aggregates
+  int temperature = ts1.temperature + ts2.temperature;
+  //  + ts3.max + ts4.max;
+  int max = ts1.max + ts2.max;
+
+  // choose the hottest component
+  if ((ts1.max-ts1.temperature)<(ts2.max-ts2.temperature)) {
+    temperature = ts1.temperature;
+    max = ts1.max;
+  } else {
+    temperature = ts2.temperature;
+    max = ts2.max;
+  }
+
+  // slow down slowly
+  if ((millis() - fan_adjust_time) > 1000) {
+//    Serial.println("Slowing Fan");
+    fan1_speed--;
+    fan_adjust_time = millis();
+  }
+
+  if (temperature >= max) {
+    fan1_speed = configuration.fan1_max;
+  } else if (temperature >= (0.85*max)) {
+    if (fan1_speed < (configuration.fan1_max*0.60)) {
+      fan1_speed++;
+      fan1_speed++;
+    }
+  } else if (temperature >= (0.60*max)) {
+    if (fan1_speed < (configuration.fan1_max*0.40)) {
+      fan1_speed++;
+      fan1_speed++;
+    }
+  } else if (temperature >= (0.40*max)) {
+    if (fan1_speed < (configuration.fan1_max*0.20)) {
+      fan1_speed++;
+      fan1_speed++;
+    }
+  } else if (temperature >= (0.20*max)) {
+    if (fan1_speed < (configuration.fan1_max*0.05)) {
+      fan1_speed++;
+      fan1_speed++;
+    }
+  } else if (temperature <= (0.20*max)) {
+    fan1_speed = (configuration.fan1_min);
+  }
+
+
+  // clamp to min speed
+  if (fan1_speed < configuration.fan1_min) {
+    fan1_speed = configuration.fan1_min;
+  }
+
+  if (fan1_speed > configuration.fan1_max) {
+    fan1_speed = configuration.fan1_max;
+  }
+
+//  Serial.print("FanSpeed:");
+//  Serial.println(fan1_speed);
   
 }
 
+
 // inc / dec int based on input keys
-void tweak_value(int &val, int btn_r_state, int btn_l_state) { 
+void tweak_value(uint8_t &val, int btn_r_state, int btn_l_state) { 
+//  Serial.print(F("changing value: "));
+//  Serial.println(val);
   if (btn_r_state == HIGH && !button_press) {
+//    Serial.println("inc");
     val++;
     button_press=true;
   } else if (btn_l_state == HIGH && !button_press) {
+//    Serial.println("dev");
     val--;
     button_press=true;
   }
+//  Serial.println("out");
 }
 
 // invert booleans on input keys
 void tweak_value(boolean &val, int btn_r_state, int btn_l_state) { 
-  if (btn_r_state == HIGH && !button_press) {
-    val=!val;
+  if (btn_l_state == HIGH && !button_press) {
+    val = false;
     button_press=true;
-  } else if (btn_l_state == HIGH && !button_press) {
-    val=!val;
+  } else if (btn_r_state == HIGH && !button_press) {
+    val = true;
     button_press=true;
   }
 }
@@ -281,6 +406,22 @@ inline const char * const BoolToString(bool b)
 {
   return b ? "True" : "False";
 }
+
+
+// locks a variable to between inclusive min and max
+// uint8's tend to rollover, for some reason, we have
+// a one-way rollover here..
+void clamp(uint8_t &val, int minv, int maxv) {
+  if (val<=minv ) {
+//    Serial.println(F("Clamping 0"));
+    val = minv;
+  } else if (val>=maxv) {
+//    Serial.println(F("Clamping Max"));
+    val = maxv;
+  }
+}
+
+
 
 
 // setup function displays the GUI for settings
@@ -299,10 +440,10 @@ void drawSetup(void) {
 
   // page 1 of setup menu
   if (setup_menu_page==1) {
-    display.drawStr(0, 0, "Setup 1/3");
-    display.drawStr(0, 14, F("cpu:"));
-    display.drawStr(0, 28, F("gpu:"));
-    display.drawStr(0, 42, F("cold:"));
+    display.drawStr(0, 0, "Setup 1/5");
+    display.drawStr(0, 14, F("T1:"));
+    display.drawStr(0, 28, F("T2:"));
+    display.drawStr(0, 42, F("T3:"));
   
     // buffer to put arbitrairy chars into
     dtostrf(configuration.t1_max, 2, 2, str_buffer);
@@ -314,10 +455,10 @@ void drawSetup(void) {
 
   // page 2 of setup menu
   } else if (setup_menu_page==2) {
-    display.drawStr(0, 0, "Setup 2/3:");
-    display.drawStr(0, 14, F("hot:"));
-    display.drawStr(0, 28, F("RAD:"));
-    display.drawStr(0, 42, F("fan:"));
+    display.drawStr(0, 0, "Setup 2/5:");
+    display.drawStr(0, 14, F("T4:"));
+    display.drawStr(0, 28, F("A1:"));
+    display.drawStr(0, 42, F("A2:"));
   
     // buffer to put arbitrairy chars into
     dtostrf(configuration.t4_max, 2, 2, str_buffer);
@@ -329,7 +470,7 @@ void drawSetup(void) {
 
   // page 3 of setup menu
   } else if (setup_menu_page==3) { 
-    display.drawStr(0, 0, "Setup 3/3:");
+    display.drawStr(0, 0, "Setup 3/5:");
     display.drawStr(0, 14, F("12bit:"));
     display.drawStr(0, 28, F("aux1:"));
     display.drawStr(0, 42, F("aux2:"));
@@ -337,6 +478,49 @@ void drawSetup(void) {
     // buffer to put arbitrairy chars into
     display.drawStr(40,14, BoolToString(configuration.hires));
 
+  } else if (setup_menu_page==4) { 
+    display.drawStr(0, 0, "Setup 4/5:");
+    display.drawStr(0, 14, F("T1:"));
+    display.drawStr(0, 28, F("T2:"));
+    display.drawStr(0, 42, F("T3:"));
+
+    // t1
+    clamp(configuration.t1_name, 0, NUM_COMPONENTS);
+    strncpy(str_buffer, components[configuration.t1_name], 4);
+    display.drawStr(40,14, str_buffer);
+
+    clamp(configuration.t2_name, 0, NUM_COMPONENTS);
+    strncpy(str_buffer, components[configuration.t2_name], 4);
+    display.drawStr(40,28, str_buffer);
+
+    clamp(configuration.t3_name, 0, NUM_COMPONENTS);
+    strncpy(str_buffer, components[configuration.t3_name], 4);
+    display.drawStr(40,42, str_buffer);
+    
+  } else if (setup_menu_page==5) { 
+    display.drawStr(0, 0, "Setup 5/5:");
+    display.drawStr(0, 14, F("T4:"));
+    display.drawStr(0, 28, F("AUX1:"));
+    display.drawStr(0, 42, F("AUX2:"));
+
+    clamp(configuration.t4_name, 0, NUM_COMPONENTS);
+    strncpy(str_buffer, components[configuration.t4_name], 4);
+    display.drawStr(40,14, str_buffer);
+    strncpy(str_buffer, components[configuration.aux1_name], 4);
+    display.drawStr(40,28, str_buffer);
+    strncpy(str_buffer, components[configuration.aux2_name], 4);
+    display.drawStr(40,42, str_buffer);
+  } else if (setup_menu_page==6) { 
+    display.drawStr(0, 0, "Setup 5/6:");
+    display.drawStr(0, 14, F("FAN1_MIN:"));
+    display.drawStr(0, 28, F("FAN1_MAX:"));
+
+    clamp(configuration.fan1_min, 0, 255);
+    dtostrf(configuration.fan1_min, 2, 2, str_buffer);
+    display.drawStr(60,14, str_buffer);
+    clamp(configuration.fan1_max, configuration.fan1_min, 255);
+    dtostrf(configuration.fan1_max, 2, 2, str_buffer);
+    display.drawStr(60,28, str_buffer);
   }
 
   // line under the current selected item
@@ -344,7 +528,7 @@ void drawSetup(void) {
 
   // check for more func button presses
   if (btn_func_state == HIGH && !button_press) {
-    Serial.println(F("Func Button"));
+//    Serial.println(F("Func Button"));
     button_press=true;
     setup_menu_item++;
 
@@ -355,7 +539,7 @@ void drawSetup(void) {
     }
 
     // if page is 4 or higher, set to 0, which is exit
-    if (setup_menu_page>=4) {
+    if (setup_menu_page>=7) {
       setup_menu_page = 0; // notifies main loop exiting config
       display.firstPage();
       do {  
@@ -385,15 +569,32 @@ void drawSetup(void) {
 
   // Fan Relative to RAD on page 1
   if (setup_menu_page==3 && setup_menu_item == 1) {tweak_value(configuration.hires, btn_r_state, btn_l_state);}
+//  if (setup_menu_page==3 && setup_menu_item == 2) {tweak_value(configuration.hires, btn_r_state, btn_l_state);}
+//  if (setup_menu_page==3 && setup_menu_item == 3) {tweak_value(configuration.hires, btn_r_state, btn_l_state);}
 
+
+  // names of components
+  if (setup_menu_page==4 && setup_menu_item == 1) {tweak_value(configuration.t1_name, btn_r_state, btn_l_state);}
+  if (setup_menu_page==4 && setup_menu_item == 2) {tweak_value(configuration.t2_name, btn_r_state, btn_l_state);}
+  if (setup_menu_page==4 && setup_menu_item == 3) {tweak_value(configuration.t3_name, btn_r_state, btn_l_state);}
+  if (setup_menu_page==5 && setup_menu_item == 1) {tweak_value(configuration.t4_name, btn_r_state, btn_l_state);}
+  if (setup_menu_page==5 && setup_menu_item == 2) {tweak_value(configuration.aux1_name, btn_r_state, btn_l_state);}
+  if (setup_menu_page==5 && setup_menu_item == 3) {tweak_value(configuration.aux2_name, btn_r_state, btn_l_state);}
+
+  // page 6
+  if (setup_menu_page==6 && setup_menu_item == 1) {tweak_value(configuration.fan1_min, btn_r_state, btn_l_state);}
+  if (setup_menu_page==6 && setup_menu_item == 2) {tweak_value(configuration.fan1_max, btn_r_state, btn_l_state);}
 
   if (digitalRead(R_BTN_PIN)==LOW && digitalRead(L_BTN_PIN)==LOW && digitalRead(FUNC_BTN_PIN) == LOW && button_press) {
+//    Serial.println(F("Setup: Button Release"));
     button_press=false;
   }
 }
 
 
 void loop(void) {
+
+  analogWrite(FAN_PIN, fan1_speed);
 
   // check the func button state, doing a simple debounce
   btn_func_state = digitalRead(FUNC_BTN_PIN);
@@ -415,15 +616,25 @@ void loop(void) {
   }
 
   if (!setup_mode) {
-    Serial.print(F("Reading Sensors: "));
+//    Serial.print(F("Reading Sensors: "));
     int m = millis();
     sensors.requestTemperatures();
-    Serial.println(millis()-m);
+//    Serial.println(millis()-m);
     t1.temperature = printData(th1);
     t2.temperature = printData(th2);
     t3.temperature = printData(th3);
     t4.temperature = printData(th4);
+
+    // set fans
+    monitor_fans(t1, t2, t3, t4);
+
+    // check the probes compared to the max levels
+    monitor(t1);
+    monitor(t2);
+    monitor(t3);
+    monitor(t4);
   }
+
   
   // call sensors.requestTemperatures() to issue a global temperature
   // request to all devices on the bus

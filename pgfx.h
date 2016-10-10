@@ -48,7 +48,7 @@ public:
   // methods
   virtual void update(int value){};
   virtual void update(float value){};
-  virtual void update(float value, float max){};
+  virtual void update(float value, float max, char name[4]){};
   virtual void update(float v1, float m1, float v2, float m2){};
   inline void init(uint8_t x, uint8_t y, uint8_t w, uint8_t h, U8GLIB_SSD1306_128X64 &display) {
     _x = (uint8_t)x;
@@ -76,7 +76,7 @@ public:
   }
 
   void
-  update(float value, float max),
+  update(float value, float max, char name[4]),
   update(float v1, float m1, float v2, float m2);
 
 protected:

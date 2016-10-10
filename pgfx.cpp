@@ -18,24 +18,26 @@
 
 */
 
-void pgfx_HBAR::update(float value, float max)
+void pgfx_HBAR::update(float value, float max, char name[4])
 {
+  _name = name;
+//  if (value >= max) {
+//    Serial.print("Warning");
+//    Serial.print(value);
+//    Serial.print(" is greater than ");
+//    Serial.println(max);
+//    _display->setFont(u8g_font_ncenB14);
+//    _display->setFontPosTop();
+//    _display->firstPage();
+//    do {
+//      _display->drawStr(16, 0, F("WARNING"));
+//      _display->drawStr(48, 24, _name);
+//    } while( _display->nextPage() );
+//    tone(_spkr_pin, 80, 125);
+//    delay(250);
+//  } else {
 
-  if (value >= max) {
-    Serial.print("Warning");
-    Serial.print(value);
-    Serial.print(" is greater than ");
-    Serial.println(max);
-    _display->setFont(u8g_font_ncenB14);
-    _display->setFontPosTop();
-    _display->firstPage();
-    do {
-      _display->drawStr(16, 0, F("WARNING"));
-      _display->drawStr(48, 24, _name);
-    } while( _display->nextPage() );
-    tone(_spkr_pin, 80, 125);
-    delay(250);
-  } else {
+
     _display->setFont(u8g_font_profont12);
     _display->setFontPosTop();
     _display->drawStr(_x, _y, _name);
@@ -49,7 +51,7 @@ void pgfx_HBAR::update(float value, float max)
     _display->setFont(u8g_font_ncenB14);
     _display->setFontPosTop();
     _display->drawStr(_x, _y+20 + (_height-36), str_buffer );
-  }
+//  }
 }
 
 void pgfx_HBAR::update(float v1, float m1, float v2, float m2)
