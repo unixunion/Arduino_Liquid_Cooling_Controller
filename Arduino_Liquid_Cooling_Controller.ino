@@ -30,16 +30,10 @@
 //#define OLED_CS    7
 //#define OLED_RESET 5
 
-
-// reset pin
-#define RESET_PIN 0
-
 // fan pin
 #define FAN_PIN 3
 unsigned long fan_adjust_time; // var for deceleration / acceleration
 #define PUMP_PIN 5
-
-
 
 // button panel
 #define FUNC_BTN_PIN 8
@@ -389,7 +383,6 @@ void calibratePump(temp_struct ts1) {
           Serial.print(pump_temperature_samples[i].temperature);
           Serial.print(" Delta from Start: ");
           Serial.println(calibration_start_temp - pump_temperature_samples[i].temperature);
-          
         }
         configuration.calibrate = false;
         EEPROM_writeAnything(0, configuration);
@@ -772,10 +765,10 @@ void loop(void) {
   }
 
   if (!setup_mode) {
-//    Serial.print(F("Reading Sensors: "));
+    // Serial.print(F("Reading Sensors: "));
     int m = millis();
     sensors.requestTemperatures();
-//    Serial.println(millis()-m);
+    // Serial.println(millis()-m);
     t1.temperature = printData(th1);
     t2.temperature = printData(th2);
     t3.temperature = printData(th3);
