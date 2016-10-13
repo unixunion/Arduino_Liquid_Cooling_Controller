@@ -49,7 +49,7 @@ public:
   virtual void update(int value){};
   virtual void update(float value){};
   virtual void update(float value, float max, char name[4]){};
-  virtual void update(float v1, float m1, float v2, float m2){};
+  virtual void update(float v1, float m1, float v2, float m2, char name[4]){};
   inline void init(uint8_t x, uint8_t y, uint8_t w, uint8_t h, U8GLIB_SSD1306_128X64 &display) {
     _x = (uint8_t)x;
     _y = (uint8_t)y;
@@ -77,7 +77,7 @@ public:
 
   void
   update(float value, float max, char name[4]),
-  update(float v1, float m1, float v2, float m2);
+  update(float v1, float m1, float v2, float m2, char name[4]);
 
 protected:
   char * _name;

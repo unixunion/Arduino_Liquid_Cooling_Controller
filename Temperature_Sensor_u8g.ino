@@ -1,9 +1,11 @@
+#include <Arduino.h>
+
 #include <SPI.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include "pgfx.h"
 #include <avr/pgmspace.h>
-#include "MemoryFree.h"
+//#include "MemoryFree.h"
 #include <EEPROM.h>
 #include "EEPROMAnything.h"
 
@@ -21,15 +23,26 @@
 #define OLED_RESET 13
 #define MAX_MEM 2048
 
+// Oled on a Pololu 32u4
+//#define OLED_MOSI   9
+//#define OLED_CLK   6
+//#define OLED_DC    8
+//#define OLED_CS    7
+//#define OLED_RESET 5
+
+
 // reset pin
 #define RESET_PIN 0
 
 // fan pin
 #define FAN_PIN 3
-unsigned long fan_adjust_time;
+unsigned long fan_adjust_time; // var for deceleration / acceleration
+#define PUMP_PIN 5
+
+
 
 // button panel
-#define FUNC_BTN_PIN 5
+#define FUNC_BTN_PIN 8
 #define R_BTN_PIN 4
 #define L_BTN_PIN 6
 
@@ -46,12 +59,8 @@ boolean button_press = false;
 int setup_menu_page = 1;
 int setup_menu_item = 1; // the initial setup item on the page
 
-// Oled on a Pololu 32u4
-//#define OLED_MOSI   9
-//#define OLED_CLK   6
-//#define OLED_DC    8
-//#define OLED_CS    7
-//#define OLED_RESET 5
+// debugger
+//auto debug = [](const char *message){ Serial::printf << message;};
 
 // The display
 U8GLIB_SSD1306_128X64 display(OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RESET);
@@ -71,8 +80,8 @@ struct temp_struct
 
 
 // names of components, pointed to by config per "monitor"
-static const char components[][4] = {"CPU", "GFX", "Cold", "HOT", "RadΔ", "Aux1", "Aux2", "Rad1", "Rad2"};
-#define NUM_COMPONENTS 8
+static const char components[10][5] = {"CPU", "GFX", "HOT", "Cold", "Rad", "Aux1", "Aux2", "Rad1", "Rad2", "AMB"};
+#define NUM_COMPONENTS 9
 
 // array of temperature probes
 //struct temp_struct probes[4];
@@ -82,6 +91,7 @@ struct temp_struct t1;
 struct temp_struct t2;
 struct temp_struct t3;
 struct temp_struct t4;
+bool probe_error = false;
 
 // thresholds config structure
 struct config_t
@@ -100,19 +110,40 @@ struct config_t
     uint8_t aux2_name;
     uint8_t fan1_min;
     uint8_t fan1_max;
+    uint8_t pump1_min;
+    uint8_t pump1_max;
     boolean hires;
+    uint8_t calibration_time;
+    boolean calibrate;
 } configuration;
 
 
-// fans
+// fans and pumps
+long prime_time = 2000; // prime pumps and fans for 2 seconds
 uint8_t fan1_speed;
+uint8_t pump1_speed;
+boolean primed = false; // fans and pumps at 100% for a second at least
+
+// pump calibration
+boolean pump_calibration_started; // initial start
+boolean pump_calibration_running; // running
+long pump_calibration_start_time; // start time
+typedef struct {
+  uint8_t speed;
+  float temperature;
+} calibration_sample;
+calibration_sample pump_temperature_samples[16]; // 16 sample points
+float calibration_start_temp; // initial temperature
+boolean pump_calibration_waiting = false; // waiting to settle temperatures
+long pump_calibration_change_time; // last time the speed of the pump was tweaked
+uint8_t pump_sample_count = 0;
 
 // gauges
-pgfx_HBAR t1bar = pgfx_HBAR(0,0,20,64," T1 ",display, SPKR_PIN);
-pgfx_HBAR t2bar = pgfx_HBAR(26,0,20,64," T2 ",display, SPKR_PIN);
-pgfx_HBAR t3bar = pgfx_HBAR(52,0,20,64," T3 ",display, SPKR_PIN);
-pgfx_HBAR t4bar = pgfx_HBAR(78,0,20,64," T4 ",display, SPKR_PIN);
-pgfx_HBAR fan1bar = pgfx_HBAR(104,0,20,64," F1 ",display, SPKR_PIN);
+pgfx_HBAR t1bar = pgfx_HBAR(0,0,20,64,"T1",display, SPKR_PIN);
+pgfx_HBAR t2bar = pgfx_HBAR(26,0,20,64,"T2",display, SPKR_PIN);
+pgfx_HBAR t3bar = pgfx_HBAR(52,0,20,64,"T3",display, SPKR_PIN);
+pgfx_HBAR t4bar = pgfx_HBAR(78,0,20,64,"T4",display, SPKR_PIN);
+pgfx_HBAR fan1bar = pgfx_HBAR(104,0,20,64,"F1",display, SPKR_PIN);
 
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
@@ -133,16 +164,17 @@ void setup(void)
 
   // set the max thresholds from config
   t1.max = configuration.t1_max;
-  strncpy( t1.name, components[configuration.t1_name], 4);
+  strncpy( t1.name, components[configuration.t1_name], 5);
   t2.max = configuration.t2_max;
-  strncpy( t2.name, components[configuration.t2_name], 4);
+  strncpy( t2.name, components[configuration.t2_name], 5);
   t3.max = configuration.t3_max;
-  strncpy( t3.name, components[configuration.t3_name], 4);
+  strncpy( t3.name, components[configuration.t3_name], 5);
   t4.max = configuration.t4_max;
-  strncpy( t4.name, components[configuration.t4_name], 4);
+  strncpy( t4.name, components[configuration.t4_name], 5);
 
-  // set the initial fan speeds to 40% max
-  fan1_speed = configuration.fan1_max*0.40;
+  // set the initial fan speeds to max
+  fan1_speed = configuration.fan1_max;
+  pump1_speed = configuration.pump1_max;
 
   // display the bootlogo
   display.setFont(u8g_font_ncenB14);
@@ -162,14 +194,16 @@ void setup(void)
   pinMode(L_BTN_PIN, INPUT);
   pinMode(R_BTN_PIN, INPUT);
   pinMode(FAN_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
 
   // test the speaker
   tone(SPKR_PIN, 80, 125);
-  
+
   // start serial port
   Serial.begin(9600);
-  Serial.println(F("Psimax Liquid Cooling Controller"));
-
+  // Serial.println(F("Controller Boot"));
+  // Serial.print("pump speed: ");
+//  Serial.println(configuration.pump1_min);
 //  Serial.println(components[0]);
 
   // Start up the library
@@ -212,21 +246,29 @@ void setup(void)
   // Must be called before search()
   //oneWire.reset_search();
   // assigns the first address found to th1
-  if (!oneWire.search(th1)) Serial.println(F("Unable to find address for th1"));
-  if (!oneWire.search(th2)) Serial.println(F("Unable to find address for th2"));
-  if (!oneWire.search(th3)) Serial.println(F("Unable to find address for th3"));
-  if (!oneWire.search(th4)) Serial.println(F("Unable to find address for th4"));
+  // String u = "Error ";
+  if (!oneWire.search(th1)) probe_error=true;
+  if (!oneWire.search(th2)) probe_error=true;
+  if (!oneWire.search(th3)) probe_error=true;
+  if (!oneWire.search(th4)) probe_error=true;
 
   // set the resolution
   int temperature_precision = TEMPERATURE_PRECISION_9;
   if (configuration.hires) {
-//    Serial.println(F("HiRes Mode"));
     temperature_precision = TEMPERATURE_PRECISION_12;
   }
   sensors.setResolution(th1, temperature_precision);
   sensors.setResolution(th2, temperature_precision);
   sensors.setResolution(th3, temperature_precision);
   sensors.setResolution(th4, temperature_precision);
+
+
+  if (configuration.calibrate) {
+    // set the minimun to 20% dity
+    pump1_speed = 255*0.20;
+    fan1_speed = 255*0.20;
+    pump_calibration_running = true;
+  }
 
 }
 
@@ -246,9 +288,9 @@ float printTemperature(DeviceAddress deviceAddress)
 {
   float tempC = sensors.getTempC(deviceAddress);
   Serial.print("Temp C: ");
-  Serial.print(tempC);
-  Serial.print(" Temp F: ");
-  Serial.print(DallasTemperature::toFahrenheit(tempC));
+  Serial.println(tempC);
+  // Serial.print(" Temp F: ");
+  // Serial.print(DallasTemperature::toFahrenheit(tempC));
   return tempC;
 }
 
@@ -276,23 +318,24 @@ void draw(temp_struct ts1, temp_struct ts2, temp_struct ts3 ,temp_struct ts4) {
   t2bar.update(ts2.temperature, ts2.max, ts2.name);
   t3bar.update(ts3.temperature, ts3.max, ts3.name);
   t4bar.update(ts4.temperature, ts4.max, ts4.name);
-  fan1bar.update(((float)fan1_speed/(float)configuration.fan1_max)*100.0, 100, "FAN1");
+  fan1bar.update(((float)fan1_speed/(float)configuration.fan1_max)*100.0, 100, ((float)pump1_speed/(float)configuration.pump1_max)*100.0, 100, "F/P");
+
 }
 
 
-// headless monitor the temperatures and tweak fan/pump/aux 
+// headless monitor the temperatures and tweak fan/pump/aux
 void monitor(temp_struct ts) {
   if (ts.temperature >= ts.max) {
     display.setFont(u8g_font_ncenB14);
     display.setFontPosTop();
     display.firstPage();
     do {
-     display.drawStr(16, 0, F("WARNING"));
+     display.drawStr(16, 0, "WARNING");
      display.drawStr(48, 24, ts.name);
     } while( display.nextPage() );
     tone(SPKR_PIN, 80, 125);
     delay(500);
-  } 
+  }
 //  else if (ts.temperature >= (0.85*ts.max)) {
 //    // raise the fan speed a little at 85% capacity
 //    fan1_speed = (configuration.fan1_max*0.85);
@@ -307,14 +350,84 @@ void monitor(temp_struct ts) {
 //  }
 }
 
-// headless monitor the temperatures and tweak fan/pump/aux 
+
+// calibration based on the cpu and gpu probe temperatures
+void calibratePump(temp_struct ts1) {
+  // upon initialiation, capture initial temperatures, start time and set start bit
+
+  if (pump_calibration_running) {
+    if (!pump_calibration_started) {
+      Serial.println("Starting Calibration");
+      calibration_start_temp = ts1.temperature;
+      pump_calibration_change_time = millis();
+      pump_calibration_started = true;
+      pump_calibration_waiting = true;
+    // if waiting for temperatures to settle, then do that, checking wait time
+    } else if (pump_calibration_waiting) {
+      Serial.println("Checking enough time has passed");
+      if ((millis()-pump_calibration_change_time) > configuration.calibration_time*1000 ) {
+        Serial.println("Saving results");
+        pump_calibration_waiting=false;
+        pump_temperature_samples[pump_sample_count] = (calibration_sample){pump1_speed, ts1.temperature};
+        pump_sample_count++;
+      }
+
+    } else {
+
+      Serial.println("Increment speed?");
+      
+      // check if max speed has been achieved, finalize calibration
+      if (pump_sample_count >= 16) {
+        Serial.println("Max speed reached");
+        pump_calibration_running = false;
+        for (int i=0; i<16; i++) {
+          Serial.print("Sample: ");
+          Serial.print(i);
+          Serial.print(" Speed: ");
+          Serial.print(pump_temperature_samples[i].speed);
+          Serial.print(" Temperature: ");
+          Serial.print(pump_temperature_samples[i].temperature);
+          Serial.print(" Delta from Start: ");
+          Serial.println(calibration_start_temp - pump_temperature_samples[i].temperature);
+          
+        }
+        configuration.calibrate = false;
+        EEPROM_writeAnything(0, configuration);
+        delay(1000);
+        resetFunc();
+      }
+
+      // increase speed by 1/16th of that is left after deducting the 20% minimun
+      pump1_speed=pump1_speed+((255-(255*0.20))/16);
+
+      // Testing
+      fan1_speed=fan1_speed+((255-(255*0.20))/16);
+      
+      pump_calibration_change_time = millis();
+      pump_calibration_waiting = true;
+      Serial.println("Speed increased");
+    }
+  } else {
+    // dont do anything
+  }
+
+
+}
+
+
+
+// headless monitor the temperatures and tweak fan/pump/aux
 void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct ts4) {
 
+  // if system is still priming, just return
+  if (!primed || pump_calibration_running) {
+    return;
+  }
 
   // put all the hot temps together and aggregates
-  int temperature = ts1.temperature + ts2.temperature;
+  int temperature; // = ts1.temperature + ts2.temperature;
   //  + ts3.max + ts4.max;
-  int max = ts1.max + ts2.max;
+  int max; // = ts1.max + ts2.max;
 
   // choose the hottest component
   if ((ts1.max-ts1.temperature)<(ts2.max-ts2.temperature)) {
@@ -370,12 +483,12 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
 
 //  Serial.print("FanSpeed:");
 //  Serial.println(fan1_speed);
-  
+
 }
 
 
 // inc / dec int based on input keys
-void tweak_value(uint8_t &val, int btn_r_state, int btn_l_state) { 
+void tweak_value(uint8_t &val, int btn_r_state, int btn_l_state) {
 //  Serial.print(F("changing value: "));
 //  Serial.println(val);
   if (btn_r_state == HIGH && !button_press) {
@@ -391,7 +504,7 @@ void tweak_value(uint8_t &val, int btn_r_state, int btn_l_state) {
 }
 
 // invert booleans on input keys
-void tweak_value(boolean &val, int btn_r_state, int btn_l_state) { 
+void tweak_value(boolean &val, int btn_r_state, int btn_l_state) {
   if (btn_l_state == HIGH && !button_press) {
     val = false;
     button_press=true;
@@ -436,15 +549,15 @@ void drawSetup(void) {
   btn_func_state = digitalRead(FUNC_BTN_PIN);
 
   // a little re-usable buffer for display conversions to str
-  char str_buffer[5];
+  char str_buffer[6];
 
   // page 1 of setup menu
   if (setup_menu_page==1) {
-    display.drawStr(0, 0, "Setup 1/5");
-    display.drawStr(0, 14, F("T1:"));
-    display.drawStr(0, 28, F("T2:"));
-    display.drawStr(0, 42, F("T3:"));
-  
+    display.drawStr(0, 0, "Setup 1/6");
+    display.drawStr(0, 14, "T1:");
+    display.drawStr(0, 28, "T2:");
+    display.drawStr(0, 42, "T3:");
+
     // buffer to put arbitrairy chars into
     dtostrf(configuration.t1_max, 2, 2, str_buffer);
     display.drawStr(40,14, str_buffer);
@@ -455,11 +568,11 @@ void drawSetup(void) {
 
   // page 2 of setup menu
   } else if (setup_menu_page==2) {
-    display.drawStr(0, 0, "Setup 2/5:");
-    display.drawStr(0, 14, F("T4:"));
-    display.drawStr(0, 28, F("A1:"));
-    display.drawStr(0, 42, F("A2:"));
-  
+    display.drawStr(0, 0, "Setup 2/6:");
+    display.drawStr(0, 14, "T4:");
+    display.drawStr(0, 28, "A1:");
+    display.drawStr(0, 42, "A2:");
+
     // buffer to put arbitrairy chars into
     dtostrf(configuration.t4_max, 2, 2, str_buffer);
     display.drawStr(40,14, str_buffer);
@@ -469,59 +582,92 @@ void drawSetup(void) {
     display.drawStr(40,42, str_buffer);
 
   // page 3 of setup menu
-  } else if (setup_menu_page==3) { 
-    display.drawStr(0, 0, "Setup 3/5:");
-    display.drawStr(0, 14, F("12bit:"));
-    display.drawStr(0, 28, F("aux1:"));
-    display.drawStr(0, 42, F("aux2:"));
-  
+  } else if (setup_menu_page==3) {
+    display.drawStr(0, 0, "Setup 3/6:");
+    display.drawStr(0, 14, "12bit:");
+    display.drawStr(0, 28, "aux1:");
+    display.drawStr(0, 42, "aux2:");
+
     // buffer to put arbitrairy chars into
     display.drawStr(40,14, BoolToString(configuration.hires));
 
-  } else if (setup_menu_page==4) { 
-    display.drawStr(0, 0, "Setup 4/5:");
-    display.drawStr(0, 14, F("T1:"));
-    display.drawStr(0, 28, F("T2:"));
-    display.drawStr(0, 42, F("T3:"));
+  } else if (setup_menu_page==4) {
+    display.drawStr(0, 0, "Setup 4/6:");
+    display.drawStr(0, 14, "T1:");
+    display.drawStr(0, 28, "T2:");
+    display.drawStr(0, 42, "T3:");
 
     // t1
     clamp(configuration.t1_name, 0, NUM_COMPONENTS);
-    strncpy(str_buffer, components[configuration.t1_name], 4);
+    strncpy(str_buffer, components[configuration.t1_name], 5);
     display.drawStr(40,14, str_buffer);
 
     clamp(configuration.t2_name, 0, NUM_COMPONENTS);
-    strncpy(str_buffer, components[configuration.t2_name], 4);
+    strncpy(str_buffer, components[configuration.t2_name], 5);
     display.drawStr(40,28, str_buffer);
 
     clamp(configuration.t3_name, 0, NUM_COMPONENTS);
-    strncpy(str_buffer, components[configuration.t3_name], 4);
+    strncpy(str_buffer, components[configuration.t3_name], 5);
     display.drawStr(40,42, str_buffer);
-    
-  } else if (setup_menu_page==5) { 
-    display.drawStr(0, 0, "Setup 5/5:");
-    display.drawStr(0, 14, F("T4:"));
-    display.drawStr(0, 28, F("AUX1:"));
-    display.drawStr(0, 42, F("AUX2:"));
+
+  } else if (setup_menu_page==5) {
+    display.drawStr(0, 0, "Setup 5/6:");
+    display.drawStr(0, 14, "T4:");
+    display.drawStr(0, 28, "AUX1:");
+    display.drawStr(0, 42, "AUX2:");
 
     clamp(configuration.t4_name, 0, NUM_COMPONENTS);
-    strncpy(str_buffer, components[configuration.t4_name], 4);
+    strncpy(str_buffer, components[configuration.t4_name], 5);
     display.drawStr(40,14, str_buffer);
-    strncpy(str_buffer, components[configuration.aux1_name], 4);
+    strncpy(str_buffer, components[configuration.aux1_name], 5);
     display.drawStr(40,28, str_buffer);
-    strncpy(str_buffer, components[configuration.aux2_name], 4);
+    strncpy(str_buffer, components[configuration.aux2_name], 5);
     display.drawStr(40,42, str_buffer);
-  } else if (setup_menu_page==6) { 
-    display.drawStr(0, 0, "Setup 5/6:");
-    display.drawStr(0, 14, F("FAN1_MIN:"));
-    display.drawStr(0, 28, F("FAN1_MAX:"));
+  } else if (setup_menu_page==6) {
+    display.drawStr(0, 0, "Setup 6/6:");
+    display.drawStr(0, 14, "FAN1_MIN:");
+    display.drawStr(0, 28, "FAN1_MAX:");
+    display.drawStr(0, 42, "PUMP1_MIN:");
 
     clamp(configuration.fan1_min, 0, 255);
     dtostrf(configuration.fan1_min, 2, 2, str_buffer);
     display.drawStr(60,14, str_buffer);
+
     clamp(configuration.fan1_max, configuration.fan1_min, 255);
     dtostrf(configuration.fan1_max, 2, 2, str_buffer);
     display.drawStr(60,28, str_buffer);
+
+    clamp(configuration.pump1_min, 0, 255);
+    dtostrf(configuration.pump1_min, 2, 2, str_buffer);
+    display.drawStr(60,42, str_buffer);
+
+  } else if (setup_menu_page==7) {
+    display.drawStr(0, 0, "Setup 7/7:");
+    display.drawStr(0, 14, "PUMP1_MAX:");
+     display.drawStr(0, 28, "CAL_TIME:");
+    display.drawStr(0, 42, "CALIBRATE:");
+
+    clamp(configuration.pump1_max, configuration.pump1_min, 255);
+    dtostrf(configuration.pump1_max, 2, 2, str_buffer);
+    display.drawStr(60,14, str_buffer);
+
+     clamp(configuration.calibration_time, 3, 120);
+     dtostrf(configuration.calibration_time, 2, 2, str_buffer);
+     display.drawStr(60,28, str_buffer);
+
+    // calibration bool
+    display.drawStr(60,42,  BoolToString(configuration.calibrate));
+
+    // clamp(configuration.fan1_max, configuration.fan1_min, 255);
+    // dtostrf(configuration.fan1_max, 2, 2, str_buffer);
+    // display.drawStr(60,28, str_buffer);
+    //
+    // clamp(configuration.pump1_min, 0, 255);
+    // dtostrf(configuration.pump1_min, 2, 2, str_buffer);
+    // display.drawStr(60,42, str_buffer);
+
   }
+
 
   // line under the current selected item
   display.drawHLine(0,(setup_menu_item*14)+11,128);
@@ -539,12 +685,12 @@ void drawSetup(void) {
     }
 
     // if page is 4 or higher, set to 0, which is exit
-    if (setup_menu_page>=7) {
+    if (setup_menu_page>=8) {
       setup_menu_page = 0; // notifies main loop exiting config
       display.firstPage();
-      do {  
-        display.drawStr(0,0,F("Writing EEPROM..."));
-      } while( display.nextPage() ); 
+      do {
+        display.drawStr(0,0,"Writing EEPROM...");
+      } while( display.nextPage() );
       EEPROM_writeAnything(0, configuration);
     }
   }
@@ -584,6 +730,12 @@ void drawSetup(void) {
   // page 6
   if (setup_menu_page==6 && setup_menu_item == 1) {tweak_value(configuration.fan1_min, btn_r_state, btn_l_state);}
   if (setup_menu_page==6 && setup_menu_item == 2) {tweak_value(configuration.fan1_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==6 && setup_menu_item == 3) {tweak_value(configuration.pump1_min, btn_r_state, btn_l_state);}
+
+  
+  if (setup_menu_page==7 && setup_menu_item == 1) {tweak_value(configuration.pump1_max, btn_r_state, btn_l_state);}
+  if (setup_menu_page==7 && setup_menu_item == 2) {tweak_value(configuration.calibration_time, btn_r_state, btn_l_state);}
+  if (setup_menu_page==7 && setup_menu_item == 3) {tweak_value(configuration.calibrate, btn_r_state, btn_l_state);}
 
   if (digitalRead(R_BTN_PIN)==LOW && digitalRead(L_BTN_PIN)==LOW && digitalRead(FUNC_BTN_PIN) == LOW && button_press) {
 //    Serial.println(F("Setup: Button Release"));
@@ -594,18 +746,22 @@ void drawSetup(void) {
 
 void loop(void) {
 
+  // write current speeds to pwm pins
   analogWrite(FAN_PIN, fan1_speed);
+  analogWrite(PUMP_PIN, pump1_speed);
 
   // check the func button state, doing a simple debounce
   btn_func_state = digitalRead(FUNC_BTN_PIN);
-  
+
   // if setup has been quit, the page will be set to 0
   if ( setup_menu_page==0 ) {
-    // exiting setup mode
+    // exiting setup mode, reset the MCU
     delay(1000);
     resetFunc();
+
+  // else if the button state is high, and its not in setup mode and its a new press.
   } else if (btn_func_state == HIGH && !setup_mode && btn_func_state != last_btn_func_state) {
-    // entering setup
+    // enter setup
     button_press = true;
     setup_mode = true;
     display.firstPage();
@@ -633,15 +789,20 @@ void loop(void) {
     monitor(t2);
     monitor(t3);
     monitor(t4);
+
+    // call calibrate method if in calibration mode with the GFX probe temps
+    if (pump_calibration_running && primed) {
+      calibratePump(t2);
+    }
   }
 
-  
+
   // call sensors.requestTemperatures() to issue a global temperature
   // request to all devices on the bus
   now = millis();
   if ((now - LAST_OLED_REFRESH) > OLED_REFRESH) {
    display.firstPage();
-    do {  
+    do {
       if (setup_mode) {
         drawSetup();
       } else {
@@ -655,5 +816,16 @@ void loop(void) {
   if (digitalRead(R_BTN_PIN)==LOW && digitalRead(L_BTN_PIN)==LOW && digitalRead(FUNC_BTN_PIN) == LOW && button_press) {
     button_press=false;
   }
-  
+
+  // if uptime greater than n, set the primed bit to slow pumps and fans down
+  if (!primed) {
+    if (millis() > prime_time) {
+      primed = true;
+      if (!pump_calibration_running) {
+        fan1_speed = configuration.fan1_min;
+        pump1_speed = configuration.pump1_min;
+      }
+    }
+  }
+
 }
