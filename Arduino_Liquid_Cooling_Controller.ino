@@ -346,6 +346,7 @@ void monitor(temp_struct ts) {
 
 
 // calibration based on the cpu and gpu probe temperatures
+// possible constants, desired temperature, ambient temperature, 1/16th of 255 ( rate of increase ) 
 void calibratePump(temp_struct ts1) {
   // upon initialiation, capture initial temperatures, start time and set start bit
 
