@@ -1,5 +1,4 @@
 #include <Arduino.h>
-
 #include <SPI.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -8,13 +7,16 @@
 #include <EEPROM.h>
 #include "EEPROMAnything.h"
 
-// Data wire is plugged into port 2 on the Arduino
+// Data wire temperature sensors are all plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
 
 // precision modes for the temperature sensors, 1/100th degree vs 1/2 degree accuracy
 // 12bit takes 700ms per cycle, 9bit takes 90ms on a UNO
 #define TEMPERATURE_PRECISION_12 12
 #define TEMPERATURE_PRECISION_9 9
+
+// motherboard PWM spec pins minimun at 20% duty cycle
+#define PWM_MINIMUN_CYCLE 0.20
 
 // Oled on a UNO
 #define OLED_MOSI   9
@@ -262,8 +264,8 @@ void setup(void)
 
   if (configuration.calibrate) {
     // set the minimun to 20% dity
-    pump1_speed = 255*0.20;
-    fan1_speed = 255*0.20;
+    pump1_speed = 255*PWM_MINIMUN_CYCLE;
+    fan1_speed = 255*PWM_MINIMUN_CYCLE;
     pump_calibration_running = true;
   }
 
@@ -383,10 +385,10 @@ void calibratePump(temp_struct ts1) {
       }
 
       // increase speed by 1/16th of that is left after deducting the 20% minimun
-      pump1_speed=pump1_speed+((255-(255*0.20))/16);
+      pump1_speed=pump1_speed+((255-(255*PWM_MINIMUN_CYCLE))/16);
 
       // Testing
-      fan1_speed=fan1_speed+((255-(255*0.20))/16);
+      fan1_speed=fan1_speed+((255-(255*PWM_MINIMUN_CYCLE))/16);
 
       pump_calibration_change_time = millis();
       pump_calibration_waiting = true;
@@ -440,7 +442,7 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
       fan1_speed++;
     }
   } else if (temperature >= (0.40*max)) {
-    if (fan1_speed < (configuration.fan1_max*0.20)) {
+    if (fan1_speed < (configuration.fan1_max*PWM_MINIMUN_CYCLE)) {
       fan1_speed++;
       fan1_speed++;
     }
@@ -451,17 +453,6 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
     }
   } else if (temperature <= (0.20*max)) {
     fan1_speed = (configuration.fan1_min);
-  }
-
-
-  // clamp to min speed
-  if (fan1_speed < configuration.fan1_min) {
-    fan1_speed = configuration.fan1_min;
-  }
-
-  // clamp to max speed
-  if (fan1_speed > configuration.fan1_max) {
-    fan1_speed = configuration.fan1_max;
   }
 
 }
@@ -601,7 +592,7 @@ void drawSetup(void) {
     display.drawStr(0, 28, "FAN1_MAX:");
     display.drawStr(0, 42, "PUMP1_MIN:");
 
-    clamp(configuration.fan1_min, 0, 255);
+    clamp(configuration.fan1_min, 20, 255);
     dtostrf(configuration.fan1_min, 2, 2, str_buffer);
     display.drawStr(60,14, str_buffer);
 
@@ -609,7 +600,7 @@ void drawSetup(void) {
     dtostrf(configuration.fan1_max, 2, 2, str_buffer);
     display.drawStr(60,28, str_buffer);
 
-    clamp(configuration.pump1_min, 0, 255);
+    clamp(configuration.pump1_min, 20, 255);
     dtostrf(configuration.pump1_min, 2, 2, str_buffer);
     display.drawStr(60,42, str_buffer);
 
@@ -625,7 +616,7 @@ void drawSetup(void) {
     display.drawStr(60,14, str_buffer);
 
     // the time to spend on each level of calibration
-    clamp(configuration.calibration_time, 3, 120);
+    clamp(configuration.calibration_time, 15, 120);
     dtostrf(configuration.calibration_time, 2, 2, str_buffer);
     display.drawStr(60,28, str_buffer);
 
@@ -701,13 +692,30 @@ void drawSetup(void) {
   if (setup_menu_page==7 && setup_menu_item == 3) {tweak_value(configuration.calibrate, btn_r_state, btn_l_state);}
 
   if (digitalRead(R_BTN_PIN)==LOW && digitalRead(L_BTN_PIN)==LOW && digitalRead(FUNC_BTN_PIN) == LOW && button_press) {
-//    Serial.println(F("Setup: Button Release"));
     button_press=false;
   }
 }
 
 
 void loop(void) {
+
+  // clamp to min speed
+  if (fan1_speed < configuration.fan1_min) {
+    fan1_speed = configuration.fan1_min;
+  }
+  if (fan1_speed > configuration.fan1_max) {
+    fan1_speed = configuration.fan1_max;
+  }
+
+  // clamp to max speed
+  if (pump1_speed > configuration.pump1_max) {
+    pump1_speed = configuration.pump1_max;
+  }
+  if (pump1_speed < configuration.pump1_min) {
+    pump1_speed = configuration.pump1_min;
+  }
+
+
 
   // write current speeds to pwm pins
   analogWrite(FAN_PIN, fan1_speed);
