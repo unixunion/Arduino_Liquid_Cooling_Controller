@@ -5,13 +5,14 @@
 #include <DallasTemperature.h>
 #include "pgfx.h"
 #include <avr/pgmspace.h>
-//#include "MemoryFree.h"
 #include <EEPROM.h>
 #include "EEPROMAnything.h"
 
-
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
+
+// precision modes for the temperature sensors, 1/100th degree vs 1/2 degree accuracy
+// 12bit takes 700ms per cycle, 9bit takes 90ms on a UNO
 #define TEMPERATURE_PRECISION_12 12
 #define TEMPERATURE_PRECISION_9 9
 
@@ -30,17 +31,19 @@
 //#define OLED_CS    7
 //#define OLED_RESET 5
 
-// fan pin
+// the fan(s) pin
 #define FAN_PIN 3
-unsigned long fan_adjust_time; // var for deceleration / acceleration
+unsigned long fan_adjust_time; // var for smooth deceleration / acceleration
+
+// the pump(s) pin
 #define PUMP_PIN 5
 
-// button panel
+// button panel for the UI
 #define FUNC_BTN_PIN 8
 #define R_BTN_PIN 4
 #define L_BTN_PIN 6
 
-// speaker
+// speaker for sqawking alarms
 #define SPKR_PIN 7
 
 // some state tracking vars for the UI
@@ -48,23 +51,21 @@ int btn_func_state = 0;
 int last_btn_func_state = 0;
 int btn_r_state = 0;
 int btn_l_state = 0;
-boolean setup_mode = false;
-boolean button_press = false;
-int setup_menu_page = 1;
+boolean setup_mode = false; // is setup mode active?
+boolean button_press = false; // has a button been pressed? ( debounce )
+int setup_menu_page = 1; // initial setup menu page
 int setup_menu_item = 1; // the initial setup item on the page
 
-// debugger
-//auto debug = [](const char *message){ Serial::printf << message;};
-
-// The display
+// The display is a u8glib compatible one. changing this requires changing
+// the pgfx type for display also.
 U8GLIB_SSD1306_128X64 display(OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RESET);
 
-// refresh rate control of the display
-unsigned int OLED_REFRESH = 125;
-unsigned int LAST_OLED_REFRESH;
-unsigned long now;
+// refresh rate control of the OLED display
+unsigned int OLED_REFRESH = 125; // ms between redraw
+unsigned int LAST_OLED_REFRESH; // last time screen was drawn
+unsigned long now; // used for millis()
 
-// structure for temp
+// structure for temperature
 struct temp_struct
 {
   float temperature;
@@ -72,22 +73,18 @@ struct temp_struct
   char name[4];
 };
 
-
 // names of components, pointed to by config per "monitor"
 static const char components[10][5] = {"CPU", "GFX", "HOT", "Cold", "Rad", "Aux1", "Aux2", "Rad1", "Rad2", "AMB"};
-#define NUM_COMPONENTS 9
+#define NUM_COMPONENTS 9 // because array length is not really possible
 
-// array of temperature probes
-//struct temp_struct probes[4];
-
-// storage for 4 temperature probes
+// temp, max and name structs for 4 temperature probes
 struct temp_struct t1;
 struct temp_struct t2;
 struct temp_struct t3;
 struct temp_struct t4;
 bool probe_error = false;
 
-// thresholds config structure
+// eeprom configuration items
 struct config_t
 {
     uint8_t t1_max;
@@ -113,31 +110,36 @@ struct config_t
 
 
 // fans and pumps
-long prime_time = 2000; // prime pumps and fans for 2 seconds
-uint8_t fan1_speed;
-uint8_t pump1_speed;
+long prime_time = 2000; // prime pumps and fans for 2 seconds to purge dust and bubbles
 boolean primed = false; // fans and pumps at 100% for a second at least
+uint8_t fan1_speed; // fan speed used for PWM
+uint8_t pump1_speed; // pump speed used for PWM
 
-// pump calibration
+
+// pump calibration system
 boolean pump_calibration_started; // initial start
 boolean pump_calibration_running; // running
 long pump_calibration_start_time; // start time
+
+// stucture for calibration samples
 typedef struct {
   uint8_t speed;
   float temperature;
 } calibration_sample;
-calibration_sample pump_temperature_samples[16]; // 16 sample points
+
+calibration_sample pump_temperature_samples[16]; // array of 16 sample points
 float calibration_start_temp; // initial temperature
 boolean pump_calibration_waiting = false; // waiting to settle temperatures
 long pump_calibration_change_time; // last time the speed of the pump was tweaked
 uint8_t pump_sample_count = 0;
 
-// gauges
+
+// graphical gauges
 pgfx_HBAR t1bar = pgfx_HBAR(0,0,20,64,"T1",display, SPKR_PIN);
 pgfx_HBAR t2bar = pgfx_HBAR(26,0,20,64,"T2",display, SPKR_PIN);
 pgfx_HBAR t3bar = pgfx_HBAR(52,0,20,64,"T3",display, SPKR_PIN);
 pgfx_HBAR t4bar = pgfx_HBAR(78,0,20,64,"T4",display, SPKR_PIN);
-pgfx_HBAR fan1bar = pgfx_HBAR(104,0,20,64,"F1",display, SPKR_PIN);
+pgfx_HBAR fan1bar = pgfx_HBAR(104,0,20,64,"FP1",display, SPKR_PIN);
 
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
@@ -146,17 +148,18 @@ OneWire oneWire(ONE_WIRE_BUS);
 // Pass our oneWire reference to Dallas Temperature.
 DallasTemperature sensors(&oneWire);
 
-// arrays to hold device addresses
+// Holders for temperature probe device addresses
 DeviceAddress th1, th2, th3, th4;
 
-void(* resetFunc) (void) = 0;//declare reset function at address 0
+//declare reset function at address 0, reboots the arduino
+void(* resetFunc) (void) = 0;
 
 void setup(void)
 {
   // read the config from eeprom
   EEPROM_readAnything(0, configuration);
 
-  // set the max thresholds from config
+  // set the various max thresholds from config
   t1.max = configuration.t1_max;
   strncpy( t1.name, components[configuration.t1_name], 5);
   t2.max = configuration.t2_max;
@@ -166,21 +169,21 @@ void setup(void)
   t4.max = configuration.t4_max;
   strncpy( t4.name, components[configuration.t4_name], 5);
 
-  // set the initial fan speeds to max
+  // set the initial fan and pump speeds to max to purge bubbles and dust.
   fan1_speed = configuration.fan1_max;
   pump1_speed = configuration.pump1_max;
 
-  // display the bootlogo
+  // display the initial state of the display
   display.setFont(u8g_font_ncenB14);
   display.setFontPosTop();
-  //display.setRot180();
+  //display.setRot180(); // rotate the screen
   display.firstPage();
   do {
-//    display.drawXBMP( 0, 0, logo_width, logo_height, logo_bits);
-//    display.setColorIndex(1);
-  display.drawStr(0,0,"Psimax");
-  display.drawStr(32,24,"Systems");
-  display.setColorIndex(1);
+    // display.drawXBMP( 0, 0, logo_width, logo_height, logo_bits);
+    // display.setColorIndex(1);
+    display.drawStr(0,0,"Psimax");
+    display.drawStr(32,24,"Systems");
+    // display.setColorIndex(1);
   } while( display.nextPage() );
 
   // buttons pin mappins, each pulled down via 10k resistor
@@ -330,23 +333,11 @@ void monitor(temp_struct ts) {
     tone(SPKR_PIN, 80, 125);
     delay(500);
   }
-//  else if (ts.temperature >= (0.85*ts.max)) {
-//    // raise the fan speed a little at 85% capacity
-//    fan1_speed = (configuration.fan1_max*0.85);
-//  } else if (ts.temperature >= (0.60*ts.max)) {
-//    fan1_speed = (configuration.fan1_max*0.60);
-//  } else if (ts.temperature >= (0.40*ts.max)) {
-//    fan1_speed = (configuration.fan1_max*0.40);
-//  } else if (ts.temperature >= (0.20*ts.max)) {
-//    fan1_speed = (configuration.fan1_max*0.20);
-//  } else if (ts.temperature <= (0.20*ts.max)) {
-//    fan1_speed = (configuration.fan1_min);
-//  }
 }
 
 
 // calibration based on the cpu and gpu probe temperatures
-// possible constants, desired temperature, ambient temperature, 1/16th of 255 ( rate of increase ) 
+// possible constants, desired temperature, ambient temperature, 1/16th of 255 ( rate of increase )
 void calibratePump(temp_struct ts1) {
   // upon initialiation, capture initial temperatures, start time and set start bit
 
@@ -370,7 +361,7 @@ void calibratePump(temp_struct ts1) {
     } else {
 
       Serial.println("Increment speed?");
-      
+
       // check if max speed has been achieved, finalize calibration
       if (pump_sample_count >= 16) {
         Serial.println("Max speed reached");
@@ -396,7 +387,7 @@ void calibratePump(temp_struct ts1) {
 
       // Testing
       fan1_speed=fan1_speed+((255-(255*0.20))/16);
-      
+
       pump_calibration_change_time = millis();
       pump_calibration_waiting = true;
       Serial.println("Speed increased");
@@ -405,10 +396,7 @@ void calibratePump(temp_struct ts1) {
     // dont do anything
   }
 
-
 }
-
-
 
 // headless monitor the temperatures and tweak fan/pump/aux
 void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct ts4) {
@@ -420,6 +408,7 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
 
   // put all the hot temps together and aggregates
   int temperature; // = ts1.temperature + ts2.temperature;
+
   //  + ts3.max + ts4.max;
   int max; // = ts1.max + ts2.max;
 
@@ -434,7 +423,6 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
 
   // slow down slowly
   if ((millis() - fan_adjust_time) > 1000) {
-//    Serial.println("Slowing Fan");
     fan1_speed--;
     fan_adjust_time = millis();
   }
@@ -471,30 +459,23 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
     fan1_speed = configuration.fan1_min;
   }
 
+  // clamp to max speed
   if (fan1_speed > configuration.fan1_max) {
     fan1_speed = configuration.fan1_max;
   }
-
-//  Serial.print("FanSpeed:");
-//  Serial.println(fan1_speed);
 
 }
 
 
 // inc / dec int based on input keys
 void tweak_value(uint8_t &val, int btn_r_state, int btn_l_state) {
-//  Serial.print(F("changing value: "));
-//  Serial.println(val);
   if (btn_r_state == HIGH && !button_press) {
-//    Serial.println("inc");
     val++;
     button_press=true;
   } else if (btn_l_state == HIGH && !button_press) {
-//    Serial.println("dev");
     val--;
     button_press=true;
   }
-//  Serial.println("out");
 }
 
 // invert booleans on input keys
@@ -508,7 +489,7 @@ void tweak_value(boolean &val, int btn_r_state, int btn_l_state) {
   }
 }
 
-// converts booleans to string for easy handling
+// converts booleans to string for easy display handling
 inline const char * const BoolToString(bool b)
 {
   return b ? "True" : "False";
@@ -520,20 +501,17 @@ inline const char * const BoolToString(bool b)
 // a one-way rollover here..
 void clamp(uint8_t &val, int minv, int maxv) {
   if (val<=minv ) {
-//    Serial.println(F("Clamping 0"));
     val = minv;
   } else if (val>=maxv) {
-//    Serial.println(F("Clamping Max"));
     val = maxv;
   }
 }
 
 
-
-
 // setup function displays the GUI for settings
 void drawSetup(void) {
 
+  // set the 12px font
   display.setFont(u8g_font_profont12);
   display.setFontPosTop();
 
@@ -562,7 +540,7 @@ void drawSetup(void) {
 
   // page 2 of setup menu
   } else if (setup_menu_page==2) {
-    display.drawStr(0, 0, "Setup 2/6:");
+    display.drawStr(0, 0, "Setup 2/7:");
     display.drawStr(0, 14, "T4:");
     display.drawStr(0, 28, "A1:");
     display.drawStr(0, 42, "A2:");
@@ -577,7 +555,7 @@ void drawSetup(void) {
 
   // page 3 of setup menu
   } else if (setup_menu_page==3) {
-    display.drawStr(0, 0, "Setup 3/6:");
+    display.drawStr(0, 0, "Setup 3/7:");
     display.drawStr(0, 14, "12bit:");
     display.drawStr(0, 28, "aux1:");
     display.drawStr(0, 42, "aux2:");
@@ -586,7 +564,7 @@ void drawSetup(void) {
     display.drawStr(40,14, BoolToString(configuration.hires));
 
   } else if (setup_menu_page==4) {
-    display.drawStr(0, 0, "Setup 4/6:");
+    display.drawStr(0, 0, "Setup 4/7:");
     display.drawStr(0, 14, "T1:");
     display.drawStr(0, 28, "T2:");
     display.drawStr(0, 42, "T3:");
@@ -605,7 +583,7 @@ void drawSetup(void) {
     display.drawStr(40,42, str_buffer);
 
   } else if (setup_menu_page==5) {
-    display.drawStr(0, 0, "Setup 5/6:");
+    display.drawStr(0, 0, "Setup 5/7:");
     display.drawStr(0, 14, "T4:");
     display.drawStr(0, 28, "AUX1:");
     display.drawStr(0, 42, "AUX2:");
@@ -618,7 +596,7 @@ void drawSetup(void) {
     strncpy(str_buffer, components[configuration.aux2_name], 5);
     display.drawStr(40,42, str_buffer);
   } else if (setup_menu_page==6) {
-    display.drawStr(0, 0, "Setup 6/6:");
+    display.drawStr(0, 0, "Setup 6/7:");
     display.drawStr(0, 14, "FAN1_MIN:");
     display.drawStr(0, 28, "FAN1_MAX:");
     display.drawStr(0, 42, "PUMP1_MIN:");
@@ -638,37 +616,29 @@ void drawSetup(void) {
   } else if (setup_menu_page==7) {
     display.drawStr(0, 0, "Setup 7/7:");
     display.drawStr(0, 14, "PUMP1_MAX:");
-     display.drawStr(0, 28, "CAL_TIME:");
+    display.drawStr(0, 28, "CAL_TIME:");
     display.drawStr(0, 42, "CALIBRATE:");
 
+    // pump minimun
     clamp(configuration.pump1_max, configuration.pump1_min, 255);
     dtostrf(configuration.pump1_max, 2, 2, str_buffer);
     display.drawStr(60,14, str_buffer);
 
-     clamp(configuration.calibration_time, 3, 120);
-     dtostrf(configuration.calibration_time, 2, 2, str_buffer);
-     display.drawStr(60,28, str_buffer);
+    // the time to spend on each level of calibration
+    clamp(configuration.calibration_time, 3, 120);
+    dtostrf(configuration.calibration_time, 2, 2, str_buffer);
+    display.drawStr(60,28, str_buffer);
 
     // calibration bool
     display.drawStr(60,42,  BoolToString(configuration.calibrate));
 
-    // clamp(configuration.fan1_max, configuration.fan1_min, 255);
-    // dtostrf(configuration.fan1_max, 2, 2, str_buffer);
-    // display.drawStr(60,28, str_buffer);
-    //
-    // clamp(configuration.pump1_min, 0, 255);
-    // dtostrf(configuration.pump1_min, 2, 2, str_buffer);
-    // display.drawStr(60,42, str_buffer);
-
   }
-
 
   // line under the current selected item
   display.drawHLine(0,(setup_menu_item*14)+11,128);
 
   // check for more func button presses
   if (btn_func_state == HIGH && !button_press) {
-//    Serial.println(F("Func Button"));
     button_press=true;
     setup_menu_item++;
 
@@ -689,34 +659,33 @@ void drawSetup(void) {
     }
   }
 
-  // CPU Temp on page 1
+  // T1 Temp on page 1
   if (setup_menu_page==1 && setup_menu_item == 1) {tweak_value(configuration.t1_max, btn_r_state, btn_l_state);}
 
-  // GPU Temp on page 1
+  // T2 Temp on page 1
   if (setup_menu_page==1 && setup_menu_item == 2) {tweak_value(configuration.t2_max, btn_r_state, btn_l_state);}
 
-  // Cold Temp on page 1
+  // T3 Temp on page 1
   if (setup_menu_page==1 && setup_menu_item == 3) {tweak_value(configuration.t3_max, btn_r_state, btn_l_state);}
 
-  // Hot Water Temp on page 1
+  // T4  Temp on page 2
   if (setup_menu_page==2 && setup_menu_item == 1) {tweak_value(configuration.t4_max, btn_r_state, btn_l_state);}
 
-  // Rad Temp on page 1
+  // AUX Temp on page 2
   if (setup_menu_page==2 && setup_menu_item == 2) {tweak_value(configuration.aux1_max, btn_r_state, btn_l_state);}
 
-  // Fan Relative to RAD on page 1
+  // AUX Temp on page 2
   if (setup_menu_page==2 && setup_menu_item == 3) {tweak_value(configuration.aux2_max, btn_r_state, btn_l_state);}
 
-  // Fan Relative to RAD on page 1
+  // HiRes / 12bit mode boolean
   if (setup_menu_page==3 && setup_menu_item == 1) {tweak_value(configuration.hires, btn_r_state, btn_l_state);}
-//  if (setup_menu_page==3 && setup_menu_item == 2) {tweak_value(configuration.hires, btn_r_state, btn_l_state);}
-//  if (setup_menu_page==3 && setup_menu_item == 3) {tweak_value(configuration.hires, btn_r_state, btn_l_state);}
 
-
-  // names of components
+  // page 4
   if (setup_menu_page==4 && setup_menu_item == 1) {tweak_value(configuration.t1_name, btn_r_state, btn_l_state);}
   if (setup_menu_page==4 && setup_menu_item == 2) {tweak_value(configuration.t2_name, btn_r_state, btn_l_state);}
   if (setup_menu_page==4 && setup_menu_item == 3) {tweak_value(configuration.t3_name, btn_r_state, btn_l_state);}
+
+  // page 5
   if (setup_menu_page==5 && setup_menu_item == 1) {tweak_value(configuration.t4_name, btn_r_state, btn_l_state);}
   if (setup_menu_page==5 && setup_menu_item == 2) {tweak_value(configuration.aux1_name, btn_r_state, btn_l_state);}
   if (setup_menu_page==5 && setup_menu_item == 3) {tweak_value(configuration.aux2_name, btn_r_state, btn_l_state);}
@@ -726,7 +695,7 @@ void drawSetup(void) {
   if (setup_menu_page==6 && setup_menu_item == 2) {tweak_value(configuration.fan1_max, btn_r_state, btn_l_state);}
   if (setup_menu_page==6 && setup_menu_item == 3) {tweak_value(configuration.pump1_min, btn_r_state, btn_l_state);}
 
-  
+
   if (setup_menu_page==7 && setup_menu_item == 1) {tweak_value(configuration.pump1_max, btn_r_state, btn_l_state);}
   if (setup_menu_page==7 && setup_menu_item == 2) {tweak_value(configuration.calibration_time, btn_r_state, btn_l_state);}
   if (setup_menu_page==7 && setup_menu_item == 3) {tweak_value(configuration.calibrate, btn_r_state, btn_l_state);}
