@@ -1,13 +1,53 @@
-#include <Arduino.h>
-#include <SPI.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
-#include "pgfx.h"
-#include <avr/pgmspace.h>
-#include <EEPROM.h>
-#include "EEPROMAnything.h"
+/*
 
-// Data wire temperature sensors are all plugged into port 2 on the Arduino
+This is a liquid cooler management system for PC's and manages the Pump and
+Fan speeds. It features a OLED display, 3 buttons for tweaking persistant configs,
+a calibration routine for pump speed, and dynamic scaling of fan/pump speed based
+on multiple temperature probes.
+
+Why: water cooler pump and fans typically follow the CPU temperatures, This system
+follows both the CPU and GPU and adjusts fan / pump speeds according to whichever
+component is the hottest in relation to its defined max thresholds.
+
+WARNING: make sure you configure your minimun pump speeds to reasonable values,
+failure to do this could cook your hardware. This includes making sure the
+pump flow rate is sufficient. You have been warned.
+
+Features:
+  * UI showing current temperatures and levels compared to thresholds
+  * setup UI for tweaking values
+  * beeping alarms when thresholds exceeded
+  * fans to 100% when thresholds exceeded
+  * dynamic fan PWM control based off CPU and GPU temperature thresholds
+  * customizable pump and fan min/max power
+  * pump calibration routine ( See Serial output for performance report and copy optimal values )
+
+Calibration:
+  * Make sure to open the serial monitor in Arduino before starting!
+  * Make sure min and max calibration has been done using Bios Fan speed monitor
+    for the pump and fans.
+  * During calibration the fans run at the lowest threshold defined.
+  * Maintain a 60% load on the CPU while running the calibration
+  * Repeat the calibration at least 3 times right after each other.
+
+
+Notes:
+  * Obtain pump / fan min operation values by setting the min's to the lowest it
+    can be, and then launching something like your bios fan speed monitor, then
+    open setup on the arduino controller, and slowly increment fan1_min and pump1_min
+    until you see a rpm change, this is the minimun for your pump/fan. Repeat for
+    max values. TODO, add tacometer to arduino to do this as part of calibration
+
+
+TODO:
+  * totaly automatic calibration routine, currently user has to find optimal
+    values in serial output.
+  * ambient vs water temperature metrics, system should compare to ambient as base
+
+*/
+
+
+// One Wire for Dallas temperature sensors are all plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
 
 // precision modes for the temperature sensors, 1/100th degree vs 1/2 degree accuracy
@@ -16,7 +56,12 @@
 #define TEMPERATURE_PRECISION_9 9
 
 // motherboard PWM spec pins minimun at 20% duty cycle
-#define PWM_MINIMUN_CYCLE 0.20
+#define PWM_MINIMUN_CYCLE 255*0.05
+#define PWM_MAX_CYCLE 255
+
+// calibration routing definitions
+#define CALIBRATION_TIME_MIN 15
+#define CALIBRATION_TIME_MAX 120
 
 // Oled on a UNO
 #define OLED_MOSI   9
@@ -33,20 +78,31 @@
 //#define OLED_CS    7
 //#define OLED_RESET 5
 
-// the fan(s) pin
+// the fan(s) PWM pin, this connects to PWM on the Radiator Fans.
 #define FAN_PIN 3
-unsigned long fan_adjust_time; // var for smooth deceleration / acceleration
 
-// the pump(s) pin
+// the pump(s) PWM pin, this connects to PWM on the Pumps.
 #define PUMP_PIN 5
 
-// button panel for the UI
+// button panel for the UI uses 3 buttons
 #define FUNC_BTN_PIN 8
 #define R_BTN_PIN 4
 #define L_BTN_PIN 6
 
-// speaker for sqawking alarms
+// speaker for squaking alarms
 #define SPKR_PIN 7
+
+
+#include <Arduino.h>
+// #include <SPI.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include "pgfx.h"
+#include <avr/pgmspace.h>
+#include <EEPROM.h>
+#include "EEPROMAnything.h"
+
+
 
 // some state tracking vars for the UI
 int btn_func_state = 0;
@@ -62,12 +118,12 @@ int setup_menu_item = 1; // the initial setup item on the page
 // the pgfx type for display also.
 U8GLIB_SSD1306_128X64 display(OLED_CLK, OLED_MOSI, OLED_CS, OLED_DC, OLED_RESET);
 
-// refresh rate control of the OLED display
+// refresh rate control of the display
 unsigned int OLED_REFRESH = 125; // ms between redraw
 unsigned int LAST_OLED_REFRESH; // last time screen was drawn
 unsigned long now; // used for millis()
 
-// structure for temperature
+// structure for temperature, its max and its name
 struct temp_struct
 {
   float temperature;
@@ -78,6 +134,9 @@ struct temp_struct
 // names of components, pointed to by config per "monitor"
 static const char components[10][5] = {"CPU", "GFX", "HOT", "Cold", "Rad", "Aux1", "Aux2", "Rad1", "Rad2", "AMB"};
 #define NUM_COMPONENTS 9 // because array length is not really possible
+
+// fan / pump vars
+unsigned long fan_adjust_time; // when the fan speed was last adjusted, smoothing
 
 // temp, max and name structs for 4 temperature probes
 struct temp_struct t1;
@@ -112,7 +171,7 @@ struct config_t
 
 
 // fans and pumps
-long prime_time = 2000; // prime pumps and fans for 2 seconds to purge dust and bubbles
+uint16_t prime_time = 2000; // prime pumps and fans for 2 seconds to purge dust and bubbles
 boolean primed = false; // fans and pumps at 100% for a second at least
 uint8_t fan1_speed; // fan speed used for PWM
 uint8_t pump1_speed; // pump speed used for PWM
@@ -121,7 +180,7 @@ uint8_t pump1_speed; // pump speed used for PWM
 // pump calibration system
 boolean pump_calibration_started; // initial start
 boolean pump_calibration_running; // running
-long pump_calibration_start_time; // start time
+uint16_t pump_calibration_start_time; // start time
 
 // stucture for calibration samples
 typedef struct {
@@ -132,7 +191,7 @@ typedef struct {
 calibration_sample pump_temperature_samples[16]; // array of 16 sample points
 float calibration_start_temp; // initial temperature
 boolean pump_calibration_waiting = false; // waiting to settle temperatures
-long pump_calibration_change_time; // last time the speed of the pump was tweaked
+unsigned long pump_calibration_change_time; // last time the speed of the pump was tweaked
 uint8_t pump_sample_count = 0;
 
 
@@ -172,8 +231,8 @@ void setup(void)
   strncpy( t4.name, components[configuration.t4_name], 5);
 
   // set the initial fan and pump speeds to max to purge bubbles and dust.
-  fan1_speed = configuration.fan1_max;
-  pump1_speed = configuration.pump1_max;
+  fan1_speed = PWM_MAX_CYCLE;
+  pump1_speed = PWM_MAX_CYCLE;
 
   // display the initial state of the display
   display.setFont(u8g_font_ncenB14);
@@ -256,16 +315,18 @@ void setup(void)
   if (configuration.hires) {
     temperature_precision = TEMPERATURE_PRECISION_12;
   }
+
+  // set the probe resolutions
   sensors.setResolution(th1, temperature_precision);
   sensors.setResolution(th2, temperature_precision);
   sensors.setResolution(th3, temperature_precision);
   sensors.setResolution(th4, temperature_precision);
 
-
+  // if calibration bit set, then set the process in motion
   if (configuration.calibrate) {
     // set the minimun to 20% dity
-    pump1_speed = 255*PWM_MINIMUN_CYCLE;
-    fan1_speed = 255*PWM_MINIMUN_CYCLE;
+    pump1_speed = PWM_MINIMUN_CYCLE;
+    fan1_speed = PWM_MINIMUN_CYCLE;
     pump_calibration_running = true;
   }
 
@@ -283,42 +344,42 @@ void printAddress(DeviceAddress deviceAddress)
 }
 
 // function to print the temperature for a device
-float printTemperature(DeviceAddress deviceAddress)
-{
-  float tempC = sensors.getTempC(deviceAddress);
-  Serial.print("Temp C: ");
-  Serial.println(tempC);
+// float printTemperature(DeviceAddress deviceAddress)
+// {
+  // return sensors.getTempC(deviceAddress);
+  // float tempC = sensors.getTempC(deviceAddress);
+  //Serial.print("Temp C: ");
+  // Serial.println(tempC);
   // Serial.print(" Temp F: ");
   // Serial.print(DallasTemperature::toFahrenheit(tempC));
-  return tempC;
-}
+  // return tempC;
+// }
 
 // function to print a device's resolution
-void printResolution(DeviceAddress deviceAddress)
-{
-  Serial.print("Resolution: ");
-  Serial.print(sensors.getResolution(deviceAddress));
-  Serial.println();
-}
+// void printResolution(DeviceAddress deviceAddress)
+// {
+//   Serial.print("Resolution: ");
+//   Serial.print(sensors.getResolution(deviceAddress));
+//   Serial.println();
+// }
 
 // main function to print information about a device
-float printData(DeviceAddress deviceAddress)
-{
-  Serial.print("Device Address: ");
-  printAddress(deviceAddress);
-  Serial.print(" ");
-  float t = printTemperature(deviceAddress);
-  Serial.println();
-  return t;
-}
+// float printData(DeviceAddress deviceAddress)
+// {
+//   Serial.print("Device Address: ");
+//   printAddress(deviceAddress);
+//   Serial.print(" ");
+//   float t = printTemperature(deviceAddress);
+//   Serial.println();
+//   return t;
+// }
 
 void draw(temp_struct ts1, temp_struct ts2, temp_struct ts3 ,temp_struct ts4) {
   t1bar.update(ts1.temperature, ts1.max, ts1.name);
   t2bar.update(ts2.temperature, ts2.max, ts2.name);
   t3bar.update(ts3.temperature, ts3.max, ts3.name);
   t4bar.update(ts4.temperature, ts4.max, ts4.name);
-  fan1bar.update(((float)fan1_speed/(float)configuration.fan1_max)*100.0, 100, ((float)pump1_speed/(float)configuration.pump1_max)*100.0, 100, "F/P");
-
+  fan1bar.update(((float)fan1_speed/(float)configuration.fan1_max)*100, 100, ((float)pump1_speed/(float)configuration.pump1_max)*100, 100, "F/P");
 }
 
 
@@ -346,16 +407,22 @@ void calibratePump(temp_struct ts1) {
   if (pump_calibration_running) {
     if (!pump_calibration_started) {
       Serial.println("Starting Calibration");
+      pump1_speed = configuration.pump1_min;
+      Serial.println("Settling...");
+      delay(10000);
       calibration_start_temp = ts1.temperature;
       pump_calibration_change_time = millis();
       pump_calibration_started = true;
       pump_calibration_waiting = true;
     // if waiting for temperatures to settle, then do that, checking wait time
     } else if (pump_calibration_waiting) {
-      Serial.println("Checking enough time has passed");
-      if ((millis()-pump_calibration_change_time) > configuration.calibration_time*1000 ) {
-        Serial.println("Saving results");
-        pump_calibration_waiting=false;
+      Serial.print("Checking if enough time has passed: millis: ");
+      Serial.println(millis()-pump_calibration_change_time);
+      if ((millis()-pump_calibration_change_time) > ((unsigned long)configuration.calibration_time*1000) ) {
+        Serial.print("Saving results for speed: ");
+        Serial.println(pump1_speed);
+        pump_calibration_waiting = false;
+        pump_calibration_change_time = millis();
         pump_temperature_samples[pump_sample_count] = (calibration_sample){pump1_speed, ts1.temperature};
         pump_sample_count++;
       }
@@ -366,33 +433,41 @@ void calibratePump(temp_struct ts1) {
 
       // check if max speed has been achieved, finalize calibration
       if (pump_sample_count >= 16) {
-        Serial.println("Max speed reached");
+        Serial.println("Calibration sample complete");
         pump_calibration_running = false;
         for (int i=0; i<16; i++) {
-          Serial.print("Sample: ");
+          Serial.print("Sample, Speed, Temperature, Delta since Start, Return");
           Serial.print(i);
-          Serial.print(" Speed: ");
+          Serial.print(", ");
           Serial.print(pump_temperature_samples[i].speed);
-          Serial.print(" Temperature: ");
+          Serial.print(", ");
           Serial.print(pump_temperature_samples[i].temperature);
-          Serial.print(" Delta from Start: ");
-          Serial.println(calibration_start_temp - pump_temperature_samples[i].temperature);
+          Serial.print(", ");
+          Serial.print(calibration_start_temp - pump_temperature_samples[i].temperature);
+          Serial.print(", ");
+          Serial.println((calibration_start_temp - pump_temperature_samples[i].temperature)/pump_temperature_samples[i].speed);
         }
         configuration.calibrate = false;
         EEPROM_writeAnything(0, configuration);
+
         delay(1000);
         resetFunc();
       }
 
+
+      // increment is 1/16th of the delta between max and min configurated values
+      uint8_t increment = ((configuration.pump1_max - configuration.pump1_min) / 16);
+
       // increase speed by 1/16th of that is left after deducting the 20% minimun
-      pump1_speed=pump1_speed+((255-(255*PWM_MINIMUN_CYCLE))/16);
+      pump1_speed=pump1_speed+increment;
 
       // Testing
-      fan1_speed=fan1_speed+((255-(255*PWM_MINIMUN_CYCLE))/16);
+      //fan1_speed=fan1_speed+increment;
 
-      pump_calibration_change_time = millis();
+      // pump_calibration_change_time = millis();
       pump_calibration_waiting = true;
-      Serial.println("Speed increased");
+      Serial.print("Speed increased to ");
+      Serial.println(pump1_speed);
     }
   } else {
     // dont do anything
@@ -400,8 +475,8 @@ void calibratePump(temp_struct ts1) {
 
 }
 
-// headless monitor the temperatures and tweak fan/pump/aux
-void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct ts4) {
+// monitor the temperatures and tweak fan/pump/aux channels
+void adjust_pwm_signals(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct ts4) {
 
   // if system is still priming, just return
   if (!primed || pump_calibration_running) {
@@ -409,10 +484,10 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
   }
 
   // put all the hot temps together and aggregates
-  int temperature; // = ts1.temperature + ts2.temperature;
+  uint8_t temperature; // = ts1.temperature + ts2.temperature;
 
   //  + ts3.max + ts4.max;
-  int max; // = ts1.max + ts2.max;
+  uint8_t max; // = ts1.max + ts2.max;
 
   // choose the hottest component
   if ((ts1.max-ts1.temperature)<(ts2.max-ts2.temperature)) {
@@ -442,12 +517,12 @@ void monitor_fans(temp_struct ts1, temp_struct ts2, temp_struct ts3, temp_struct
       fan1_speed++;
     }
   } else if (temperature >= (0.40*max)) {
-    if (fan1_speed < (configuration.fan1_max*PWM_MINIMUN_CYCLE)) {
+    if (fan1_speed < (configuration.fan1_max*0.30)) {
       fan1_speed++;
       fan1_speed++;
     }
   } else if (temperature >= (0.20*max)) {
-    if (fan1_speed < (configuration.fan1_max*0.05)) {
+    if (fan1_speed < (configuration.fan1_max*0.25)) {
       fan1_speed++;
       fan1_speed++;
     }
@@ -592,15 +667,15 @@ void drawSetup(void) {
     display.drawStr(0, 28, "FAN1_MAX:");
     display.drawStr(0, 42, "PUMP1_MIN:");
 
-    clamp(configuration.fan1_min, 20, 255);
+    clamp(configuration.fan1_min, PWM_MINIMUN_CYCLE, PWM_MAX_CYCLE);
     dtostrf(configuration.fan1_min, 2, 2, str_buffer);
     display.drawStr(60,14, str_buffer);
 
-    clamp(configuration.fan1_max, configuration.fan1_min, 255);
+    clamp(configuration.fan1_max, configuration.fan1_min, PWM_MAX_CYCLE);
     dtostrf(configuration.fan1_max, 2, 2, str_buffer);
     display.drawStr(60,28, str_buffer);
 
-    clamp(configuration.pump1_min, 20, 255);
+    clamp(configuration.pump1_min, PWM_MINIMUN_CYCLE, PWM_MAX_CYCLE);
     dtostrf(configuration.pump1_min, 2, 2, str_buffer);
     display.drawStr(60,42, str_buffer);
 
@@ -611,12 +686,12 @@ void drawSetup(void) {
     display.drawStr(0, 42, "CALIBRATE:");
 
     // pump minimun
-    clamp(configuration.pump1_max, configuration.pump1_min, 255);
+    clamp(configuration.pump1_max, configuration.pump1_min, PWM_MAX_CYCLE);
     dtostrf(configuration.pump1_max, 2, 2, str_buffer);
     display.drawStr(60,14, str_buffer);
 
     // the time to spend on each level of calibration
-    clamp(configuration.calibration_time, 15, 120);
+    clamp(configuration.calibration_time, CALIBRATION_TIME_MIN, CALIBRATION_TIME_MAX);
     dtostrf(configuration.calibration_time, 2, 2, str_buffer);
     display.drawStr(60,28, str_buffer);
 
@@ -697,25 +772,13 @@ void drawSetup(void) {
 }
 
 
+
 void loop(void) {
 
-  // clamp to min speed
-  if (fan1_speed < configuration.fan1_min) {
-    fan1_speed = configuration.fan1_min;
-  }
-  if (fan1_speed > configuration.fan1_max) {
-    fan1_speed = configuration.fan1_max;
-  }
 
-  // clamp to max speed
-  if (pump1_speed > configuration.pump1_max) {
-    pump1_speed = configuration.pump1_max;
-  }
-  if (pump1_speed < configuration.pump1_min) {
-    pump1_speed = configuration.pump1_min;
-  }
-
-
+  // use clamp to ensure minimun and maximun operating levels are maintained
+  clamp(fan1_speed, configuration.fan1_min, configuration.fan1_max);
+  clamp(pump1_speed, configuration.pump1_min, configuration.pump1_max);
 
   // write current speeds to pwm pins
   analogWrite(FAN_PIN, fan1_speed);
@@ -744,16 +807,16 @@ void loop(void) {
 
   if (!setup_mode) {
     // Serial.print(F("Reading Sensors: "));
-    int m = millis();
+    // int m = millis();
     sensors.requestTemperatures();
     // Serial.println(millis()-m);
-    t1.temperature = printData(th1);
-    t2.temperature = printData(th2);
-    t3.temperature = printData(th3);
-    t4.temperature = printData(th4);
+    t1.temperature = sensors.getTempC(th1);
+    t2.temperature = sensors.getTempC(th2);
+    t3.temperature = sensors.getTempC(th3);
+    t4.temperature = sensors.getTempC(th4);
 
     // set fans
-    monitor_fans(t1, t2, t3, t4);
+    adjust_pwm_signals(t1, t2, t3, t4);
 
     // check the probes compared to the max levels
     monitor(t1);
@@ -763,7 +826,7 @@ void loop(void) {
 
     // call calibrate method if in calibration mode with the GFX probe temps
     if (pump_calibration_running && primed) {
-      calibratePump(t2);
+      calibratePump(t1);
     }
   }
 
@@ -798,5 +861,10 @@ void loop(void) {
       }
     }
   }
+
+  Serial.print("PUMP1: ");
+  Serial.print(pump1_speed);
+  Serial.print(" FAN1: ");
+  Serial.println(fan1_speed);
 
 }
